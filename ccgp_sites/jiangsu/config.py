@@ -1,0 +1,15 @@
+DEFAULT_CONFIG = {
+    "keyword": "公安",
+    "max_retries": 5,
+    "max_results": 2,
+    "publish_time": "近三天",
+    "zone": "",
+    "notice_type": "cggg",
+    "purchase_way": "",
+    "buyer": "",
+    "proj_number": "",
+    "agent": "",
+    "content": "",
+    "resume": False,
+    "interactive": True,
+}
