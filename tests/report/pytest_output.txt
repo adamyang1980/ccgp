@@ -1,0 +1,48 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.2, pytest-9.0.2, pluggy-1.5.0 -- C:\Users\adam\MiniConda3\python.exe
+cachedir: .pytest_cache
+metadata: {'Python': '3.13.2', 'Platform': 'Windows-11-10.0.26220-SP0', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.5.0'}, 'Plugins': {'anyio': '4.11.0', 'cov': '7.0.0', 'html': '4.2.0', 'metadata': '3.1.1'}}
+rootdir: C:\Users\adam\ccgp
+plugins: anyio-4.11.0, cov-7.0.0, html-4.2.0, metadata-3.1.1
+collecting ... collected 27 items
+
+tests/test_base_spider.py::test_parse_date_to_ts_valid_and_invalid PASSED [  3%]
+tests/test_base_spider.py::test_filter_item_secondary_and_date_range PASSED [  7%]
+tests/test_base_spider.py::test_probe_phase_noninteractive_returns_false PASSED [ 11%]
+tests/test_base_spider.py::test_search_phase_collects_and_persists_results PASSED [ 14%]
+tests/test_base_spider.py::test_process_details_skips_done_and_retries PASSED [ 18%]
+tests/test_jiangsu_spider.py::test_parse_date_ms_defaults PASSED         [ 22%]
+tests/test_jiangsu_spider.py::test_preprocess_captcha_scales_and_modes PASSED [ 25%]
+tests/test_jiangsu_spider.py::test_recognize_captcha_local_no_ocr PASSED [ 29%]
+tests/test_jiangsu_spider.py::test_recognize_captcha_local_parses_result PASSED [ 33%]
+tests/test_jiangsu_spider.py::test_recognize_captcha_api_success PASSED  [ 37%]
+tests/test_jiangsu_spider.py::test_get_captcha_retries_until_confident PASSED [ 40%]
+tests/test_jiangsu_spider.py::test_fetch_page_items_adds_detail_url PASSED [ 44%]
+tests/test_jiangsu_spider.py::test_fetch_page_items_clears_captcha_on_error PASSED [ 48%]
+tests/test_xinjiang_spider.py::test_build_search_payload_includes_filters PASSED [ 51%]
+tests/test_xinjiang_spider.py::test_do_probe_request_ok PASSED           [ 55%]
+tests/test_xinjiang_spider.py::test_do_probe_request_slider_on_non_json PASSED [ 59%]
+tests/test_xinjiang_spider.py::test_capture_captcha_images_decodes PASSED [ 62%]
+tests/test_xinjiang_spider.py::test_detect_gap_distance_handles_missing_inputs PASSED [ 66%]
+tests/test_xinjiang_spider.py::test_detect_gap_distance_returns_int PASSED [ 70%]
+tests/test_xinjiang_spider.py::test_generate_human_track_shape PASSED    [ 74%]
+tests/test_xinjiang_spider.py::test_handle_slider_captcha_no_slider PASSED [ 77%]
+tests/test_xinjiang_spider.py::test_extract_item_id_fallback PASSED      [ 81%]
+tests/test_zhejiang_spider.py::test_extract_list_items_from_known_shape PASSED [ 85%]
+tests/test_zhejiang_spider.py::test_extract_list_items_fallback PASSED   [ 88%]
+tests/test_zhejiang_spider.py::test_extract_content_html PASSED          [ 92%]
+tests/test_zhejiang_spider.py::test_extract_attachment_urls PASSED       [ 96%]
+C:\Users\adam\MiniConda3\Lib\site-packages\coverage\report_core.py:113: CoverageWarning: Couldn't parse 'C:\Users\adam\ccgp\config-3.py': No source for code: 'C:\Users\adam\ccgp\config-3.py'. (couldnt-parse); see https://coverage.readthedocs.io/en/7.13.1/messages.html#warning-couldnt-parse
+  coverage._warn(msg, slug="couldnt-parse")
+C:\Users\adam\MiniConda3\Lib\site-packages\coverage\report_core.py:113: CoverageWarning: Couldn't parse 'C:\Users\adam\ccgp\config.py': No source for code: 'C:\Users\adam\ccgp\config.py'. (couldnt-parse); see https://coverage.readthedocs.io/en/7.13.1/messages.html#warning-couldnt-parse
+  coverage._warn(msg, slug="couldnt-parse")
+tests/test_zhejiang_spider.py::test_download_file_writes_content PASSED  [100%]
+
+-------- generated xml file: C:\Users\adam\ccgp\tests\report\junit.xml --------
+=============================== tests coverage ================================
+_______________ coverage: platform win32, python 3.13.2-final-0 _______________
+
+Coverage HTML written to dir tests/report/coverage_html
+Coverage XML written to file tests/report/coverage.xml
+- Generated html report: file:///C:/Users/adam/ccgp/tests/report/test_report.html -
+============================= 27 passed in 1.46s ==============================
