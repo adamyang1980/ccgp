@@ -359,128 +359,325 @@ class XinjiangCCGPSearch(BaseSpider):
              finally:
                  await page.close()
 
-    # --- Slider Logic (Ported) ---
-    async def _handle_slider_captcha(self, page, manual_mode=False):
+    # --- Slider Logic (Enhanced) ---
+    async def _handle_slider_captcha(self, page, manual_mode=False, max_retries=3):
+        """
+        增强版滑块验证码处理
+        - 支持多种选择器适配不同版本阿里云滑块
+        - 最多重试 max_retries 次
+        - 改进的间隙检测和轨迹生成
+        """
+        # 扩展的滑块选择器列表（支持多版本阿里云滑块）
         SLIDER_SELECTORS = [
-            "#aliyunCaptcha-sliding-slider", ".aliyunCaptcha-sliding-slider", 
-            "#nc_1_n1z", ".nc-container .btn_slide"
+            # 新版阿里云滑块
+            "#aliyunCaptcha-sliding-slider",
+            ".aliyunCaptcha-sliding-slider",
+            "[class*='aliyunCaptcha'][class*='slider']",
+            # 旧版阿里云滑块  
+            "#nc_1_n1z",
+            "#nc_2_n1z",
+            ".nc-container .btn_slide",
+            ".nc_scale_text .btn_slide",
+            ".nc_iconfont.btn_slide",
+            # 通用滑块选择器
+            ".slider-btn",
+            ".slide-btn",
+            "[class*='slider'][class*='btn']",
         ]
         
         slider = None
+        matched_selector = None
+        
+        # 等待页面完全加载
+        await asyncio.sleep(0.5)
+        
         for sel in SLIDER_SELECTORS:
-             try: 
-                 if await page.is_visible(sel):
-                     slider = await page.wait_for_selector(sel, timeout=1000)
-                     break
-             except: pass
-        
-        if not slider: 
-            return False, True # No captcha found (passed)
-
-        print("[验证码] 检测到滑块，准备破解...")
-        
-        # 1. Capture images
-        shadow_bytes, bg_bytes = await self._capture_captcha_images(page)
-        gap_distance = 0
-        
-        if shadow_bytes and bg_bytes:
-            gap_distance = self._detect_gap_distance(shadow_bytes, bg_bytes)
-            # Scale adjustment if needed (simplified here, in real scenario we check element width vs image width)
-            # Assuming 1:1 for simplicity or that detect_gap returns pixels relative to image which matches element
-            # Often need scaling:
             try:
-                bg_el = await page.query_selector(".aliyunCaptcha-sliding-img img")
-                if bg_el:
-                    bbox = await bg_el.bounding_box()
-                    # If we could read real image width from bytes
-                    arr = np.frombuffer(bg_bytes, np.uint8)
-                    real_img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-                    if real_img is not None:
-                        real_w = real_img.shape[1]
-                        scale = bbox["width"] / real_w
-                        gap_distance = int(gap_distance * scale)
+                if await page.is_visible(sel):
+                    slider = await page.wait_for_selector(sel, timeout=2000)
+                    matched_selector = sel
+                    break
             except Exception:
                 pass
         
-        if gap_distance == 0:
-            gap_distance = 260 # Fallback
-            
-        # 2. Generate track
-        track = self._generate_human_track(gap_distance)
-        
-        # 3. Slide
-        box = await slider.bounding_box()
-        if not box: return True, False
-        
-        start_x = box["x"] + box["width"] / 2
-        start_y = box["y"] + box["height"] / 2
-        
-        await page.mouse.move(start_x, start_y)
-        await page.mouse.down()
-        for p in track:
-            await page.mouse.move(start_x + p["x"], start_y + p["y"])
-            # await asyncio.sleep(p["delay"]) # create_human_track usually has delays, but here p is dict
-            if "delay" in p:
-                await asyncio.sleep(p["delay"])
-            else:
-                 await asyncio.sleep(0.01)
-        await page.mouse.up()
-        
-        # 4. Check result
-        await asyncio.sleep(2)
-        if not await slider.is_visible():
-            return True, True
+        if not slider:
+            self.log_info("[滑块] 未检测到滑块验证码，跳过")
+            return False, True  # No captcha found (passed)
 
+        self.log_info(f"[滑块] 检测到滑块验证码 (选择器: {matched_selector})，准备自动破解...")
+        
+        for attempt in range(1, max_retries + 1):
+            self.log_info(f"[滑块] 第 {attempt}/{max_retries} 次尝试...")
+            
+            # 1. 捕获验证码图片
+            shadow_bytes, bg_bytes = await self._capture_captcha_images(page)
+            gap_distance = None
+            
+            if shadow_bytes and bg_bytes:
+                # 尝试检测间隙距离
+                gap_distance = self._detect_gap_distance(shadow_bytes, bg_bytes)
+                self.log_info(f"[滑块] 检测到间隙距离: {gap_distance} 像素")
+                
+                # 缩放校正
+                if gap_distance:
+                    try:
+                        # 尝试多种背景图选择器
+                        bg_selectors = [
+                            ".aliyunCaptcha-sliding-img img",
+                            "[class*='aliyunCaptcha'] img:not([class*='block'])",
+                            ".nc_bg img",
+                            ".yundun-captcha img",
+                        ]
+                        bg_el = None
+                        for bg_sel in bg_selectors:
+                            try:
+                                bg_el = await page.query_selector(bg_sel)
+                                if bg_el:
+                                    break
+                            except:
+                                pass
+                        
+                        if bg_el:
+                            bbox = await bg_el.bounding_box()
+                            if bbox:
+                                arr = np.frombuffer(bg_bytes, np.uint8)
+                                real_img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+                                if real_img is not None:
+                                    real_w = real_img.shape[1]
+                                    if real_w > 0:
+                                        scale = bbox["width"] / real_w
+                                        gap_distance = int(gap_distance * scale)
+                                        self.log_info(f"[滑块] 缩放后间隙距离: {gap_distance} 像素 (scale: {scale:.2f})")
+                    except Exception as e:
+                        self.log_error(f"[滑块] 缩放校正失败: {e}")
+            else:
+                self.log_info("[滑块] 无法捕获验证码图片，使用动态fallback")
+            
+            # 动态 fallback 距离（根据尝试次数微调）
+            if not gap_distance or gap_distance <= 0:
+                # 使用随机fallback以增加成功概率
+                base_distances = [220, 240, 260, 280]
+                gap_distance = base_distances[(attempt - 1) % len(base_distances)] + random.randint(-10, 10)
+                self.log_info(f"[滑块] 使用动态fallback距离: {gap_distance} 像素")
+            
+            # 2. 生成人类轨迹（根据尝试次数调整速度）
+            duration = 0.4 + (attempt - 1) * 0.15  # 每次尝试稍微慢一点
+            track = self._generate_human_track(gap_distance, duration=duration)
+            
+            # 3. 执行滑动
+            box = await slider.bounding_box()
+            if not box:
+                self.log_error("[滑块] 无法获取滑块位置")
+                await asyncio.sleep(1)
+                continue
+            
+            start_x = box["x"] + box["width"] / 2
+            start_y = box["y"] + box["height"] / 2
+            
+            # 模拟真实的鼠标移动
+            await page.mouse.move(start_x + random.uniform(-5, 5), start_y + random.uniform(-3, 3))
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+            await page.mouse.move(start_x, start_y)
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+            
+            await page.mouse.down()
+            await asyncio.sleep(random.uniform(0.02, 0.08))
+            
+            for p in track:
+                await page.mouse.move(start_x + p["x"], start_y + p["y"])
+                if "delay" in p:
+                    await asyncio.sleep(p["delay"])
+                else:
+                    await asyncio.sleep(0.01)
+            
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+            await page.mouse.up()
+            
+            # 4. 检查结果
+            await asyncio.sleep(1.5 + random.uniform(0, 0.5))
+            
+            # 检查滑块是否消失（验证成功）
+            slider_still_visible = False
+            try:
+                slider_still_visible = await page.is_visible(matched_selector)
+            except:
+                pass
+            
+            if not slider_still_visible:
+                self.log_info(f"[滑块] ✓ 验证成功！(第 {attempt} 次尝试)")
+                return True, True
+            
+            # 检查是否有错误提示
+            error_indicators = [
+                ".aliyunCaptcha-sliding-tips",
+                ".nc_iconfont.icon_warn",
+                "[class*='error']",
+                "[class*='fail']",
+            ]
+            has_error = False
+            for err_sel in error_indicators:
+                try:
+                    if await page.is_visible(err_sel):
+                        has_error = True
+                        break
+                except:
+                    pass
+            
+            if has_error:
+                self.log_info(f"[滑块] 第 {attempt} 次尝试失败，检测到错误提示")
+            else:
+                self.log_info(f"[滑块] 第 {attempt} 次尝试未通过验证")
+            
+            # 等待重试
+            if attempt < max_retries:
+                wait_time = 1.5 + attempt * 0.5
+                self.log_info(f"[滑块] 等待 {wait_time:.1f} 秒后重试...")
+                await asyncio.sleep(wait_time)
+                
+                # 刷新滑块（如果需要）
+                try:
+                    refresh_btn = await page.query_selector(".aliyunCaptcha-sliding-refresh, .nc_iconfont.icon_refresh")
+                    if refresh_btn and await refresh_btn.is_visible():
+                        await refresh_btn.click()
+                        await asyncio.sleep(1)
+                except:
+                    pass
+
+        # 所有自动尝试失败
+        self.log_info(f"[滑块] 自动破解失败（共 {max_retries} 次尝试）")
+        
         if manual_mode:
-             print("[验证码] 自动破解失败，请手动滑动...")
-             await WindowController.restore(self.window_keyword)
-             # Wait loop
-             for _ in range(30):
-                 if not await slider.is_visible():
-                     await WindowController.minimize(self.window_keyword)
-                     return True, True
-                 await asyncio.sleep(1)
-             await WindowController.minimize(self.window_keyword)
+            self.log_info("[滑块] 请手动完成滑块验证...")
+            WindowController.restore(self.window_keyword)
+            
+            # 等待人工验证完成
+            for _ in range(60):  # 最多等待60秒
+                try:
+                    if not await page.is_visible(matched_selector):
+                        WindowController.minimize(self.window_keyword)
+                        self.log_info("[滑块] ✓ 人工验证成功！")
+                        return True, True
+                except:
+                    pass
+                await asyncio.sleep(1)
+            
+            WindowController.minimize(self.window_keyword)
         
         return True, False
 
+
+
+
     async def _capture_captcha_images(self, frame):
-        # frame can be page or frame
+        """
+        增强版验证码图片捕获
+        支持多种阿里云滑块版本的选择器
+        """
+        # 多版本选择器的JS代码
         js = """
         async () => {
             function getDataUrl(img) {
-                const canvas = document.createElement('canvas');
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                canvas.getContext('2d').drawImage(img, 0, 0);
-                return canvas.toDataURL('image/png');
+                if (!img) return null;
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.naturalWidth || img.width;
+                    canvas.height = img.naturalHeight || img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    return canvas.toDataURL('image/png');
+                } catch (e) {
+                    return null;
+                }
             }
-            const bg = document.querySelector('.aliyunCaptcha-sliding-img img');
-            const shadow = document.querySelector('.aliyunCaptcha-sliding-block img'); // selector varies
+            
+            // 多种背景图选择器
+            const bgSelectors = [
+                '.aliyunCaptcha-sliding-img img',
+                '[class*="aliyunCaptcha"] [class*="img"] img',
+                '.nc_bg img',
+                '.yundun-captcha-img img',
+                'img[class*="captcha-bg"]',
+                'img[src*="captcha"]',
+            ];
+            
+            // 多种滑块图选择器
+            const shadowSelectors = [
+                '.aliyunCaptcha-sliding-block img',
+                '[class*="aliyunCaptcha"] [class*="block"] img',
+                '.nc_jig img',
+                '.yundun-captcha-block img',
+                'img[class*="captcha-block"]',
+            ];
+            
+            let bg = null;
+            let shadow = null;
+            
+            // 查找背景图
+            for (const sel of bgSelectors) {
+                try {
+                    const el = document.querySelector(sel);
+                    if (el && el.complete && el.naturalWidth > 0) {
+                        bg = el;
+                        break;
+                    }
+                } catch (e) {}
+            }
+            
+            // 查找滑块图
+            for (const sel of shadowSelectors) {
+                try {
+                    const el = document.querySelector(sel);
+                    if (el && el.complete && el.naturalWidth > 0) {
+                        shadow = el;
+                        break;
+                    }
+                } catch (e) {}
+            }
+            
             if (!bg) return null;
+            
             return {
                 bg: getDataUrl(bg),
-                shadow: shadow ? getDataUrl(shadow) : null
+                shadow: getDataUrl(shadow)
             };
         }
         """
         try:
-             # Try generic selectors for aliyun
-             # Note: Actual logic invokes 'evaluate' on frame
-             data = await frame.evaluate(js)
-             if not data: return None, None
-             
-             import base64
-             def decode(d):
-                 if not d: return None
-                 return base64.b64decode(d.split(',')[1])
-                 
-             return decode(data.get("shadow")), decode(data.get("bg"))
-        except:
-             return None, None
+            data = await frame.evaluate(js)
+            if not data:
+                self.log_info("[滑块] 无法通过JS捕获验证码图片")
+                return None, None
+            
+            import base64
+            def decode(d):
+                if not d:
+                    return None
+                try:
+                    return base64.b64decode(d.split(',')[1])
+                except Exception:
+                    return None
+            
+            shadow_data = decode(data.get("shadow"))
+            bg_data = decode(data.get("bg"))
+            
+            if bg_data:
+                self.log_info(f"[滑块] 成功捕获背景图 ({len(bg_data)} bytes)")
+            if shadow_data:
+                self.log_info(f"[滑块] 成功捕获滑块图 ({len(shadow_data)} bytes)")
+            
+            return shadow_data, bg_data
+        except Exception as e:
+            self.log_error(f"[滑块] 捕获验证码图片异常: {e}")
+            return None, None
 
     def _detect_gap_distance(self, shadow_bytes, bg_bytes):
-        if not shadow_bytes or not bg_bytes: return None
+        """
+        增强版间隙检测算法
+        使用多种边缘检测参数和模板匹配方法的组合
+        """
+        if not shadow_bytes or not bg_bytes:
+            return None
+        
         try:
             shadow_arr = np.frombuffer(shadow_bytes, np.uint8)
             bg_arr = np.frombuffer(bg_bytes, np.uint8)
@@ -488,22 +685,98 @@ class XinjiangCCGPSearch(BaseSpider):
             shadow = cv2.imdecode(shadow_arr, cv2.IMREAD_GRAYSCALE)
             bg = cv2.imdecode(bg_arr, cv2.IMREAD_GRAYSCALE)
             
-            if shadow is None or bg is None: return None
+            if shadow is None or bg is None:
+                self.log_error("[滑块] 无法解码验证码图片")
+                return None
             
-            # Simple template matching or edge detection
-            # Aliyun often has the gap in BG directly or we match shadow to BG
-            # Here we assume standard gap detection: Canny edge + max diff or template match
+            self.log_info(f"[滑块] 背景图尺寸: {bg.shape}, 滑块图尺寸: {shadow.shape}")
             
-            # Simplified robust logic:
-            # 1. Edge detection on bg
-            bg_edge = cv2.Canny(bg, 100, 200)
-            shadow_edge = cv2.Canny(shadow, 100, 200)
+            # 检查尺寸是否合理
+            if shadow.shape[0] > bg.shape[0] or shadow.shape[1] > bg.shape[1]:
+                self.log_error("[滑块] 滑块图尺寸大于背景图，无法匹配")
+                return None
             
-            res = cv2.matchTemplate(bg_edge, shadow_edge, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+            # 多种检测方法尝试
+            results = []
             
-            return max_loc[0] # x coordinate
-        except:
+            # 方法1: 边缘检测 + 模板匹配 (多种Canny参数)
+            canny_params = [
+                (50, 150),
+                (100, 200),
+                (80, 180),
+            ]
+            
+            for low, high in canny_params:
+                try:
+                    bg_edge = cv2.Canny(bg, low, high)
+                    shadow_edge = cv2.Canny(shadow, low, high)
+                    
+                    res = cv2.matchTemplate(bg_edge, shadow_edge, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                    
+                    if max_val > 0.3:  # 置信度阈值
+                        results.append({
+                            'x': max_loc[0],
+                            'confidence': max_val,
+                            'method': f'Canny({low},{high})+TM_CCOEFF'
+                        })
+                except Exception as e:
+                    pass
+            
+            # 方法2: 直接模板匹配 (适用于部分滑块)
+            match_methods = [
+                (cv2.TM_CCOEFF_NORMED, 'TM_CCOEFF_NORMED'),
+                (cv2.TM_CCORR_NORMED, 'TM_CCORR_NORMED'),
+            ]
+            
+            for method, method_name in match_methods:
+                try:
+                    res = cv2.matchTemplate(bg, shadow, method)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                    
+                    if max_val > 0.4:
+                        results.append({
+                            'x': max_loc[0],
+                            'confidence': max_val,
+                            'method': f'Direct+{method_name}'
+                        })
+                except Exception:
+                    pass
+            
+            # 方法3: 高斯模糊后匹配
+            try:
+                bg_blur = cv2.GaussianBlur(bg, (5, 5), 0)
+                shadow_blur = cv2.GaussianBlur(shadow, (5, 5), 0)
+                
+                res = cv2.matchTemplate(bg_blur, shadow_blur, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                
+                if max_val > 0.35:
+                    results.append({
+                        'x': max_loc[0],
+                        'confidence': max_val,
+                        'method': 'GaussianBlur+TM_CCOEFF'
+                    })
+            except Exception:
+                pass
+            
+            if not results:
+                self.log_info("[滑块] 所有检测方法均未找到有效间隙")
+                return None
+            
+            # 选择置信度最高的结果
+            best = max(results, key=lambda r: r['confidence'])
+            self.log_info(f"[滑块] 最佳检测结果: x={best['x']}, 置信度={best['confidence']:.3f}, 方法={best['method']}")
+            
+            # 验证结果合理性（间隙通常在图像中间偏右位置）
+            bg_width = bg.shape[1]
+            if best['x'] < 20 or best['x'] > bg_width - 20:
+                self.log_info(f"[滑块] 检测到的间隙位置({best['x']})可能不合理，但仍尝试使用")
+            
+            return best['x']
+            
+        except Exception as e:
+            self.log_error(f"[滑块] 间隙检测异常: {e}")
             return None
 
     def _generate_human_track(self, distance, duration=0.5):
