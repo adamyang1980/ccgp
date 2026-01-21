@@ -50,7 +50,14 @@
   - 添加缺失的 `ensure_dir` 和 `write_json` 导入
   - 更新测试用例以反映新的行为
 - **复现命令**: `python scripts/run_site.py xinjiang --max-pages 1 --max-results 3 --verbose`
-- **状态**: ⚠️ 未解决，交由其它 AI 处理
+- **【第五轮修复】**：实现**浏览器模式下的请求拦截**以获取真实 API URL
+  - 问题根因：网站使用动态或隐藏的 API URL，静态构造的 API 请求返回空列表或无效数据。且返回 `data` 结构可能是字典而非列表。
+  - 修复方案：
+    - 在 `_fetch_page_items_browser` 第一页时，通过点击搜索按钮并使用 `page.expect_response` 拦截真实的 POST 请求，动态更新 `self.api_url`。
+    - 增强数据解析逻辑：当 `data` (或 `result`) 是字典时，自动尝试查找 `children`, `list`, `records` 等可能的列表字段。
+    - 替换代码中遗留的 `log_warning` 为 `log_info` 以避免 AttributeError。
+  - 验证结果：成功获取列表数据 (如 Step 71 中获取 4 条数据)。
+- **状态**: ✅ 已修复
 
 ---
 

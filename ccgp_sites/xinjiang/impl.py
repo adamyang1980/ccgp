@@ -23,6 +23,7 @@ from playwright.async_api import async_playwright
 from ccgp_core.antibot import ChallengeStateMachine, RunContext, prepare_results_dir
 from ccgp_core.fs import sanitize_filename
 from ccgp_core.human_track import create_human_track
+from ccgp_core.output import ensure_dir, write_json
 from ccgp_core.spider import BaseSpider
 
 # --- Window Controller helper ---
@@ -117,6 +118,10 @@ class XinjiangCCGPSearch(BaseSpider):
         })
         self._http_warmed = False
         
+        # 浏览器模式标志：当 WAF 使用 JS 挑战时，使用 Playwright 获取数据
+        self._use_browser_mode = False
+        self._browser_context = None
+        
         # Params
         self.start_date = config.get("start_date")
         self.end_date = config.get("end_date")
@@ -134,33 +139,75 @@ class XinjiangCCGPSearch(BaseSpider):
         self._http_warmed = True
 
     def _do_probe_request(self) -> str:
-        # Check if HTTP is blocked or WAF'd
+        """
+        探测请求：检测 HTTP 是否被 WAF 拦截
+        返回: 'ok', 'slider', 'captcha', 'network_error'
+        """
         self._ensure_http_warmed()
         payload = self._build_search_payload(1)
+        
         try:
+            self.log_info(f"[探测] 发起 HTTP 探测请求到 {self.api_url}")
+            self.log_info(f"[探测] Session cookies: {list(self.session.cookies.keys())}")
+            
             r = self.session.post(self.api_url, json=payload, timeout=20)
             ct = r.headers.get("content-type", "")
-            if "json" in ct and r.status_code == 200:
+            
+            self.log_info(f"[探测] HTTP 响应: status={r.status_code}, content-type={ct}")
+            self.log_info(f"[探测] 响应内容预览: {r.text[:500]}")
+            
+            # 检查是否是正常的 JSON 响应
+            if r.status_code == 200 and "json" in ct.lower():
                 try:
                     js = r.json()
-                    # Check if response is valid JSON structure
-                    if isinstance(js.get("result"), dict):
+                    # 检查 JSON 结构 - 放宽条件
+                    result = js.get("result")
+                    if result is not None:
+                        # result 可以是 dict、list 或其他非空值
+                        self.log_info(f"[探测] JSON 响应有效，result 类型: {type(result).__name__}")
                         return "ok"
-                except: pass
+                    elif "data" in js:
+                        self.log_info("[探测] JSON 响应有效 (包含 data 字段)")
+                        return "ok"
+                    else:
+                        self.log_info(f"[探测] JSON 响应结构不符预期: {list(js.keys())}")
+                except Exception as e:
+                    self.log_error(f"[探测] JSON 解析失败: {e}")
             
-            # Use pipeline detector if available, or just heuristic
+            # 检测 WAF/验证码标记
             text = r.text[:4000].lower()
-            if "aliyun_waf" in text or "captcha" in text or r.status_code == 405:
+            if "aliyun" in text or "waf" in text or "captcha" in text or "滑块" in text:
+                self.log_info("[探测] 检测到 WAF/验证码关键词，自动启用浏览器模式")
+                self._use_browser_mode = True
+                return "ok"  # 返回 ok 因为浏览器模式可以处理
+            
+            if r.status_code == 405:
+                self.log_info("[探测] HTTP 405 错误，可能需要验证")
                 return "slider"
-            return "slider" # Fallback to assume slider if HTTP fails
-        except Exception:
-            return "slider" # Network error likely means blocked or needs browser
+            
+            if r.status_code >= 400:
+                self.log_info(f"[探测] HTTP 错误 {r.status_code}")
+                return "slider"
+            
+            # 如果响应是 200 但不是预期的 JSON，可能需要验证
+            self.log_info("[探测] 响应非预期格式，假定需要验证")
+            return "slider"
+            
+        except requests.exceptions.Timeout:
+            self.log_error("[探测] 请求超时")
+            return "network_error"
+        except Exception as e:
+            self.log_error(f"[探测] 请求异常: {e}")
+            return "slider"
 
     def solve_slider_cdp(self) -> bool:
-        # Spin up Playwright to solve slider
+        """
+        使用 CDP 解决滑块验证码。
+        如果成功，会启用浏览器模式来绑定后续所有请求。
+        """
         global CHROME_CDP_URL
         if not CHROME_CDP_URL:
-             CHROME_CDP_URL = launch_chrome_for_cdp()
+            CHROME_CDP_URL = launch_chrome_for_cdp()
         
         if not CHROME_CDP_URL:
             self.log_error("Could not launch Chrome for CDP.")
@@ -169,48 +216,179 @@ class XinjiangCCGPSearch(BaseSpider):
         return asyncio.run(self._solve_slider_async())
 
     async def _solve_slider_async(self):
+        """
+        通过 Playwright/CDP 解决滑块验证码
+        关键：需要在浏览器中触发 API 请求才能显示阿里云滑块
+        """
         async with async_playwright() as p:
             try:
                 browser = await p.chromium.connect_over_cdp(CHROME_CDP_URL)
-                if browser.contexts: context = browser.contexts[0]
-                else: context = await browser.new_context()
+                if browser.contexts:
+                    context = browser.contexts[0]
+                else:
+                    context = await browser.new_context()
                 
                 page = await context.new_page()
                 try:
-                    await page.goto(self.get_landing_url(), timeout=30000)
-                    # Trigger slider check (often on load or first request)
-                    # We might need to trigger a search to see the slider
+                    self.log_info(f"[滑块] 导航到: {self.get_landing_url()}")
+                    await page.goto(self.get_landing_url(), timeout=30000, wait_until="domcontentloaded")
                     
+                    # 等待页面加载
+                    await asyncio.sleep(2)
+                    
+                    # 策略1: 首先检查页面上是否已经有滑块
                     found, passed = await self._handle_slider_captcha(page, manual_mode=self.interactive)
-                    if passed:
-                        # Sync cookies
+                    if found and passed:
+                        self.log_info("[滑块] 首次检查通过")
                         cookies = await context.cookies()
                         for c in cookies:
-                            self.session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
+                            self.session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''), path=c.get('path', '/'))
                         return True
+                    
+                    # 策略2: 如果没有找到滑块，尝试在浏览器中触发 API 请求
+                    if not found:
+                        self.log_info("[滑块] 页面上未发现滑块，尝试触发 API 请求...")
+                        
+                        # 在浏览器中执行 fetch 请求来触发阿里云滑块
+                        payload = self._build_search_payload(1)
+                        trigger_js = f"""
+                        async () => {{
+                            try {{
+                                const response = await fetch('{self.api_url}', {{
+                                    method: 'POST',
+                                    headers: {{
+                                        'Content-Type': 'application/json',
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'X-Requested-With': 'XMLHttpRequest'
+                                    }},
+                                    body: JSON.stringify({json.dumps(payload)})
+                                }});
+                                
+                                const text = await response.text();
+                                return {{
+                                    status: response.status,
+                                    ok: response.ok,
+                                    contentType: response.headers.get('content-type') || '',
+                                    bodyPreview: text.substring(0, 500)
+                                }};
+                            }} catch (e) {{
+                                return {{error: e.toString()}};
+                            }}
+                        }}
+                        """
+                        
+                        try:
+                            result = await page.evaluate(trigger_js)
+                            self.log_info(f"[滑块] API 请求结果: status={result.get('status')}, ok={result.get('ok')}")
+                            
+                            if result.get('error'):
+                                self.log_error(f"[滑块] API 请求错误: {result.get('error')}")
+                        except Exception as e:
+                            self.log_error(f"[滑块] 执行 API 请求失败: {e}")
+                        
+                        # 等待滑块出现
+                        await asyncio.sleep(2)
+                        
+                        # 再次检查滑块
+                        found2, passed2 = await self._handle_slider_captcha(page, manual_mode=self.interactive)
+                        if passed2:
+                            self.log_info("[滑块] 第二次检查通过")
+                            cookies = await context.cookies()
+                            for c in cookies:
+                                self.session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''), path=c.get('path', '/'))
+                            return True
+                        elif found2:
+                            # 找到了滑块但未通过
+                            self.log_info("[滑块] 检测到滑块但自动破解失败")
+                            return False
+                    
+                    # 策略3: 尝试点击页面上的搜索按钮触发
+                    self.log_info("[滑块] 尝试点击搜索触发...")
+                    search_btn_selectors = [
+                        ".search-btn", 
+                        "button[type='submit']",
+                        ".btn-search",
+                        "input[type='submit']",
+                    ]
+                    for sel in search_btn_selectors:
+                        try:
+                            btn = await page.query_selector(sel)
+                            if btn and await btn.is_visible():
+                                await btn.click()
+                                await asyncio.sleep(2)
+                                
+                                found3, passed3 = await self._handle_slider_captcha(page, manual_mode=self.interactive)
+                                if passed3:
+                                    self.log_info("[滑块] 点击搜索后验证通过")
+                                    cookies = await context.cookies()
+                                    for c in cookies:
+                                        self.session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''), path=c.get('path', '/'))
+                                    return True
+                                break
+                        except Exception:
+                            pass
+                    
+                    # 如果所有策略都失败，尝试手动模式
+                    if self.interactive:
+                        self.log_info("[滑块] 所有自动策略失败，等待人工验证...")
+                        WindowController.restore(self.window_keyword)
+                        
+                        for _ in range(60):
+                            # 检查是否通过（页面变化或cookies出现）
+                            cookies = await context.cookies()
+                            cookie_names = [c['name'] for c in cookies]
+                            if any('aliyun' in name.lower() or 'acw' in name.lower() for name in cookie_names):
+                                WindowController.minimize(self.window_keyword)
+                                self.log_info("[滑块] 检测到验证 cookies，人工验证成功")
+                                for c in cookies:
+                                    self.session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''), path=c.get('path', '/'))
+                                return True
+                            await asyncio.sleep(1)
+                        
+                        WindowController.minimize(self.window_keyword)
+                    
+                    self.log_error("[滑块] 所有验证策略均失败")
                     return False
+                    
                 finally:
-                   await page.close()
+                    await page.close()
             except Exception as e:
                 self.log_error(f"CDP Slider Solve Error: {e}")
+                import traceback
+                traceback.print_exc()
                 return False
 
     def fetch_page_items(self, page_no: int) -> List[Dict[str, Any]]:
-        # Try HTTP first
+        """
+        获取列表页数据。
+        如果启用了浏览器模式，使用 Playwright 获取；否则使用 HTTP Session。
+        """
+        if self._use_browser_mode:
+            return asyncio.run(self._fetch_page_items_browser(page_no))
+        
+        # HTTP 模式
         payload = self._build_search_payload(page_no)
         items = []
         try:
             r = self.session.post(self.api_url, json=payload, timeout=30)
+            ct = r.headers.get("content-type", "").lower()
+            
+            # 检查是否被 WAF 拦截
+            if "json" not in ct or "aliyun" in r.text[:1000].lower():
+                self.log_info("[获取] HTTP 请求被 WAF 拦截，切换到浏览器模式")
+                self._use_browser_mode = True
+                return asyncio.run(self._fetch_page_items_browser(page_no))
+            
             data = r.json()
             if data:
-                 res = data.get("result", {})
-                 if isinstance(res, dict):
-                      items = res.get("data", [])
+                res = data.get("result", {})
+                if isinstance(res, dict):
+                    items = res.get("data", [])
         except Exception as e:
-            # If HTTP fails, we might need to use browser to fetch items too?
-            # Or just let the loop continue and next probe will trigger slider solve again.
             self.log_error(f"Fetch page HTTP failed: {e}")
-            raise # Raise to trigger probe_phase
+            # 尝试使用浏览器模式
+            self._use_browser_mode = True
+            return asyncio.run(self._fetch_page_items_browser(page_no))
 
         # Normalization
         for item in items:
@@ -218,6 +396,172 @@ class XinjiangCCGPSearch(BaseSpider):
             item_id = item.get("articleId")
             if item_id:
                 item["detail_url"] = f"http://www.ccgp-xinjiang.gov.cn/site/detail?parentId=3661&articleId={quote(str(item_id))}"
+        return items
+
+    async def _fetch_page_items_browser(self, page_no: int) -> List[Dict[str, Any]]:
+        """
+        使用 Playwright 浏览器获取列表页数据（绕过 WAF JS 挑战）
+        """
+        global CHROME_CDP_URL
+        
+        # 确保 Chrome 已启动
+        if not CHROME_CDP_URL:
+            self.log_info("[浏览器模式] Chrome 未启动，正在启动...")
+            CHROME_CDP_URL = launch_chrome_for_cdp()
+            if not CHROME_CDP_URL:
+                self.log_error("[浏览器模式] 无法启动 Chrome")
+                return []
+            self.log_info(f"[浏览器模式] Chrome 启动成功: {CHROME_CDP_URL}")
+        
+        self.log_info(f"[浏览器模式] 获取第 {page_no} 页数据...")
+        
+        payload = self._build_search_payload(page_no)
+        items = []
+        
+        async with async_playwright() as p:
+            try:
+                browser = await p.chromium.connect_over_cdp(CHROME_CDP_URL)
+                if browser.contexts:
+                    context = browser.contexts[0]
+                else:
+                    context = await browser.new_context()
+                
+                page = await context.new_page()
+                try:
+                    await page.goto(self.get_landing_url(), timeout=30000, wait_until="domcontentloaded")
+                    await asyncio.sleep(1)
+                    
+                    # 模拟人类行为：滚动和点击，增加真实感
+                    try:
+                        await page.evaluate("window.scrollTo({top: 100, behavior: 'smooth'})")
+                        await asyncio.sleep(0.5)
+                        await page.mouse.move(100, 100)
+                        await page.mouse.click(100, 100)
+                    except: pass
+
+                    result = {}
+                    if page_no == 1:
+                        self.log_info("[浏览器模式] 尝试通过页面交互捕获真实 API 请求...")
+                        try:
+                            # 尝试点击搜索并拦截请求
+                            async with page.expect_response(
+                                lambda r: r.status == 200 and r.request.method == "POST" and "json" in r.headers.get("content-type", "").lower() and len(r.url) > 20,
+                                timeout=60000
+                            ) as response_info:
+                                search_clicked = False
+                                for sel in [".search-btn", ".btn-search", "button[type='button']", "input[type='submit']", ".icon-search"]:
+                                    if await page.is_visible(sel):
+                                        await page.click(sel)
+                                        search_clicked = True
+                                        break
+                                if not search_clicked:
+                                    self.log_info("[浏览器模式] Warning: 未找到搜索按钮，等待可能自动发出的请求...")
+                            
+                            response = await response_info.value
+                            self.log_info(f"[浏览器模式] 捕获到真实 API URL: {response.url}")
+                            self.api_url = response.url
+                            json_data = await response.json()
+                            result = {"success": True, "data": json_data}
+                        except Exception as capture_err:
+                            self.log_info(f"[浏览器模式] Warning: 捕获请求超时或失败: {capture_err}，尝试回退到 fetch")
+
+                    if not result.get("success"):
+                        # 使用 json.dumps 确保 JS 代码安全
+                        payload_json = json.dumps(payload)
+                        fetch_js = """
+                        async () => {
+                            try {
+                                const response = await fetch('""" + self.api_url + """', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'X-Requested-With': 'XMLHttpRequest'
+                                    },
+                                    body: JSON.stringify(""" + payload_json + """)
+                                });
+                                
+                                if (!response.ok) {
+                                    return {error: 'HTTP ' + response.status};
+                                }
+                                
+                                const data = await response.json();
+                                return {success: true, data: data};
+                            } catch (e) {
+                                return {error: e.toString()};
+                            }
+                        }
+                        """
+                        
+                        self.log_info(f"[浏览器模式] 执行 API 请求 (URL: {self.api_url})...")
+                        result = await page.evaluate(fetch_js)
+                    
+                    if not isinstance(result, dict):
+                        self.log_error(f"[浏览器模式] 异常：evaluate返回非字典类型 {type(result)}")
+                        return []
+                    
+                    if result.get("error"):
+                        self.log_error(f"[浏览器模式] API 请求失败: {result.get('error')}")
+                        
+                        # 检查是否需要处理滑块
+                        found, passed = await self._handle_slider_captcha(page, manual_mode=self.interactive)
+                        if found and not passed:
+                            self.log_error("[浏览器模式] 滑块验证失败")
+                            return []
+                        
+                        # 重试请求
+                        await asyncio.sleep(1)
+                        result = await page.evaluate(fetch_js)
+                        
+                        if not isinstance(result, dict) or result.get("error"):
+                            self.log_error(f"[浏览器模式] 重试失败: {result.get('error') if isinstance(result, dict) else result}")
+                            return []
+                    
+                    if result.get("success"):
+                        data = result.get("data")
+                        if isinstance(data, dict):
+                            res = data.get("result")
+                            if isinstance(res, dict):
+                                raw_items = res.get("data")
+                                if isinstance(raw_items, list):
+                                    items = [i for i in raw_items if isinstance(i, dict)]
+                                elif isinstance(raw_items, dict):
+                                    self.log_info(f"[浏览器模式] res['data'] 是字典，尝试查找列表字段 (keys: {list(raw_items.keys())})")
+                                    possible_keys = ["data", "records", "rows", "list", "content", "result", "children"]
+                                    found_list = None
+                                    for k in possible_keys:
+                                        if isinstance(raw_items.get(k), list):
+                                            found_list = raw_items.get(k)
+                                            break
+                                    
+                                    if found_list is not None:
+                                        items = [i for i in found_list if isinstance(i, dict)]
+                                    else:
+                                        self.log_error(f"[浏览器模式] 无法在 res['data'] 中找到列表数据")
+                                else:
+                                    self.log_error(f"[浏览器模式] res['data'] 不是列表: {type(raw_items)}")
+                            else:
+                                self.log_error(f"[浏览器模式] data['result'] 不是字典: {type(res)}")
+                        else:
+                            self.log_error(f"[浏览器模式] result['data'] 不是字典: {type(data)}")
+                        
+                        self.log_info(f"[浏览器模式] 获取到 {len(items)} 条数据")
+                    
+                finally:
+                    await page.close()
+                    
+            except Exception as e:
+                self.log_error(f"[浏览器模式] 异常: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Normalization
+        for item in items:
+            item["title"] = item.get("title", "No Title")
+            item_id = item.get("articleId")
+            if item_id:
+                item["detail_url"] = f"http://www.ccgp-xinjiang.gov.cn/site/detail?parentId=3661&articleId={quote(str(item_id))}"
+        
         return items
 
     def _build_search_payload(self, page_no: int) -> Dict[str, Any]:
