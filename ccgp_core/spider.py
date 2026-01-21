@@ -10,6 +10,7 @@ from ccgp_core.antibot import ChallengeStateMachine, RunContext, prepare_results
 from ccgp_core.fs import sanitize_filename
 from ccgp_core.output import ensure_dir, write_json, write_text
 from ccgp_core.pipeline import probe_with_http_request
+from ccgp_core.request_fingerprint import RandomHeadersGenerator, random_delay, get_random_delay_value
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,10 @@ class BaseSpider(ABC):
         self.resume = config.get("resume", False)
         self.interactive = config.get("interactive", True)
         self.verbose = config.get("verbose", True)
+        
+        # 反反爬虫配置
+        self.request_delay_range = config.get("request_delay_range", (1.0, 3.0))
+        self.headers_generator = RandomHeadersGenerator()
         
         # 初始化上下文
         self.out_dir = prepare_results_dir(site_name, resume=self.resume)
@@ -65,10 +70,8 @@ class BaseSpider(ABC):
         print(f"[{timestamp}] [ERROR] {msg}")
 
     def configure_session(self):
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*"
-        })
+        # 使用随机化请求头
+        self.headers_generator.update_session_headers(self.session, rotate_ua=False)
 
     def run(self) -> bool:
         """
@@ -134,9 +137,46 @@ class BaseSpider(ABC):
         return False
 
     def solve_captcha_ocr(self) -> bool:
-        # TODO: 集成 OCR 服务
-        self.log_info("OCR 服务尚未集成, 跳过")
-        return False
+        """
+        Default OCR solving flow:
+        1. Fetch captcha image from self.get_captcha_url().
+        2. Use OCRService to recognize.
+        3. Store result in self.current_captcha.
+        """
+        url = self.get_captcha_url()
+        if not url:
+            self.log_error("Captcha URL not defined.")
+            return False
+
+        try:
+            from ccgp_core.ocr_service import OCRService
+            service = OCRService.get_instance()
+            
+            # Fetch image
+            resp = self.session.get(url, timeout=10)
+            if resp.status_code != 200:
+                self.log_error(f"Failed to fetch captcha: {resp.status_code}")
+                return False
+            
+            # Recognize
+            text, score = service.recognize_captcha(resp.content)
+            if text and score >= 0.4: # Default threshold
+                self.current_captcha = text
+                self.log_info(f"OCR Recognized: {text} (Score: {score:.2f})")
+                return True
+            else:
+                self.log_error(f"OCR failed or low confidence: {text} ({score:.2f})")
+                return False
+        except Exception as e:
+            self.log_error(f"solve_captcha_ocr error: {e}")
+            return False
+
+    def get_captcha_url(self) -> Optional[str]:
+        """
+        Return the URL to fetch captcha image. Subclasses can override or set self.captcha_url.
+        """
+        return getattr(self, "captcha_url", None)
+
 
     def solve_slider_cdp(self) -> bool:
         # TODO: 集成 CDP 滑块破解
@@ -215,6 +255,12 @@ class BaseSpider(ABC):
             
             # 保存中间结果
             write_json(summary_path, collected)
+            
+            # 反反爬虫: 随机延迟
+            if page_no <= self.max_pages and len(collected) < self.max_results:
+                delay = random_delay(self.request_delay_range[0], self.request_delay_range[1])
+                if self.verbose:
+                    self.log_info(f"等待 {delay:.1f} 秒...")
 
         # 详情页抓取
         self.process_details(collected)

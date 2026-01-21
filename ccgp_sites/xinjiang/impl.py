@@ -329,6 +329,11 @@ class XinjiangCCGPSearch(BaseSpider):
          if not url: return {}
          self._ensure_http_warmed()
          r = self.session.get(url, timeout=30)
+         
+         # 反反爬虫: 详情页请求后随机延迟
+         from ccgp_core.request_fingerprint import random_delay
+         random_delay(0.5, 1.5)
+         
          return {"html": r.text, "final_url": r.url, "offline_html": r.text}
 
     async def get_detail_with_playwright(self, item):

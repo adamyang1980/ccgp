@@ -17,6 +17,7 @@ from PIL import Image, ImageEnhance, ImageFilter
 from urllib3.exceptions import InsecureRequestWarning
 
 from ccgp_core.fs import sanitize_filename
+from ccgp_core.output import ensure_dir, write_json
 from ccgp_core.spider import BaseSpider
 
 urllib3.disable_warnings(InsecureRequestWarning)
@@ -24,14 +25,11 @@ urllib3.disable_warnings(InsecureRequestWarning)
 OCR_API_URL = os.getenv("OCR_API_URL", "")
 OCR_API_TOKEN = os.getenv("OCR_API_TOKEN", "")
 
-CAPTCHA_CONFIDENCE_THRESHOLD = 0.8
-CAPTCHA_PREPROCESS_SCALE = 3
-CAPTCHA_BRIGHTNESS_FACTOR = 1.2
-CAPTCHA_CONTRAST_FACTOR = 3.0
-CAPTCHA_BINARY_THRESHOLD = 120
+# OCR Service
+from ccgp_core.ocr_service import OCRService
+
+CAPTCHA_CONFIDENCE_THRESHOLD = 0.4
 CAPTCHA_MAX_RETRIES = 10
-RETRY_BACKOFF_FACTOR = 2
-MAX_RETRY_DELAY = 60
 
 CACHE_DIR = os.path.join(os.getcwd(), ".cache", "ccgp")
 CACHE_PAGES_DIR = os.path.join(CACHE_DIR, "pages")
@@ -55,8 +53,9 @@ class JiangsuCCGPSearch(BaseSpider):
             "Pragma": "no-cache",
         })
         
-        self.ocr = None
-        self._init_ocr()
+        
+        # Initialize OCR Service
+        self.ocr_service = OCRService.get_instance()
         self._init_cache_dirs()
         self.current_captcha = None
         
@@ -72,23 +71,7 @@ class JiangsuCCGPSearch(BaseSpider):
         except Exception:
              pass
 
-    def _init_ocr(self):
-        try:
-            os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
-            logging.getLogger("ppocr").setLevel(logging.ERROR)
-            logging.getLogger("paddle").setLevel(logging.ERROR)
-            warnings.filterwarnings("ignore")
-            from paddleocr import PaddleOCR
-            self.ocr = PaddleOCR(
-                lang="en",
-                use_textline_orientation=False,
-                enable_mkldnn=True,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-            )
-        except Exception as e:
-            self.log_error(f"PaddleOCR Init Failed: {e}")
-            self.ocr = None
+    # _init_ocr removed (handled by OCRService)
 
     def _init_cache_dirs(self):
         os.makedirs(CACHE_PAGES_DIR, exist_ok=True)
@@ -116,10 +99,14 @@ class JiangsuCCGPSearch(BaseSpider):
 
     def handle_verification(self, kind: str) -> bool:
         if kind == "captcha":
+            self.log_info(f"探测到验证码，开始自动 OCR 识别 (API/Local)...")
             code = self.get_captcha()
             if code:
                 self.current_captcha = code
+                self.log_info(f"OCR 识别成功: {code}")
                 return True
+            else:
+                self.log_error("OCR 识别失败，已重试多次")
         return False
 
     def fetch_page_items(self, page_no: int) -> List[Dict[str, Any]]:
@@ -143,14 +130,21 @@ class JiangsuCCGPSearch(BaseSpider):
         res = self.session.get(self.search_url, params=params, timeout=30)
         try:
             data = res.json()
-        except:
+        except Exception:
+            # If response is not JSON, it's likely an error page (WAF, session timeout, etc.)
+            # We must reset captcha to force a fresh probe/login cycle.
+            self.log_error(f"非 JSON 响应 (Invalid JSON response): {res.text[:200]}")
+            self.current_captcha = None
             raise Exception("Invalid JSON response")
 
         if data.get("code") != 200:
              msg = data.get("message", "")
+             # If explicit error or any non-200, better to reset captcha just in case
+             # especially if we can't be sure it's NOT a captcha error.
+             self.log_error(f"API 返回错误: {msg}")
+             self.current_captcha = None 
              if "验证码" in msg:
-                 self.current_captcha = None
-                 raise Exception("captcha_error") # Will trigger re-probe
+                 raise Exception("captcha_error")
              raise Exception(f"API Error: {msg}")
 
         items = data.get("result", {}).get("list", []) or []
@@ -182,6 +176,11 @@ class JiangsuCCGPSearch(BaseSpider):
         data = resp.json()
         if data.get("msg") != "OK":
             raise Exception(f"Detail API Error: {data.get('msg')}")
+        
+        # 反反爬虫: 详情页请求后随机延迟
+        from ccgp_core.request_fingerprint import random_delay
+        random_delay(0.5, 1.5)
+        
         return data.get("data", {})
 
     def save_detail(self, item: Dict[str, Any], detail: Dict[str, Any], base_dir: str):
@@ -224,86 +223,8 @@ class JiangsuCCGPSearch(BaseSpider):
                         self.log_error(f"Attachment download failed: {e}")
 
     # --- OCR Helper Methods ---
-    # --- OCR Helper Methods ---
-    def preprocess_captcha(self, image):
-        gray = image.convert("L")
-        enhancer = ImageEnhance.Contrast(gray)
-        contrast = enhancer.enhance(self.config.get("CAPTCHA_CONTRAST_FACTOR", 3.0))
-        width, height = contrast.size
-        # Using module constant for scaling if available, else 3
-        scale = getattr(self, "CAPTCHA_PREPROCESS_SCALE", 3)
-        resized = contrast.resize((width * scale, height * scale), Image.LANCZOS)
-        binary = resized.point(lambda x: 0 if x < CAPTCHA_BINARY_THRESHOLD else 255, "1")
-        denoised = binary.convert("L").filter(ImageFilter.MedianFilter(size=3))
-        sharpened = denoised.filter(ImageFilter.SHARPEN)
-        return sharpened
-
-    def preprocess_captcha_for_local_ocr(self, image: Image.Image) -> Image.Image:
-        """Specific preprocessing for paddleocr (expects RGB usually but we enhance it)"""
-        gray = image.convert("L")
-        # Increase contrast
-        enhancer = ImageEnhance.Contrast(gray)
-        contrast = enhancer.enhance(2.0)
-        
-        # Scale up
-        width, height = contrast.size
-        scale = 4
-        resized = contrast.resize((width * scale, height * scale), Image.LANCZOS)
-        
-        # Binarize
-        binary = resized.point(lambda x: 0 if x < 140 else 255, "1")
-        
-        # Denoise
-        denoised = binary.convert("RGB")
-        return denoised
-
     def recognize_captcha_local(self, image_bytes: bytes) -> Tuple[Optional[str], float]:
-        if not self.ocr:
-            return None, 0.0
-        
-        try:
-            image = Image.open(BytesIO(image_bytes))
-            # Preprocess
-            processed_img = self.preprocess_captcha_for_local_ocr(image)
-            img_array = np.array(processed_img)
-            
-            result = self.ocr.ocr(img_array, cls=False)
-            
-            # PaddleOCR result shape: [[[[pts], (text, score)], ...]]
-            # Sometimes it returns None or empty list
-            if not result or not result[0]:
-                return None, 0.0
-
-            text_results = []
-            scores = []
-            
-
-            
-            res = result[0]
-            # Handle list of lines
-            full_text = ""
-            total_score = 0.0
-            count = 0
-            
-
-            if isinstance(res, list):
-                for line in res:
-                    # line structure: [points, (text, score)]
-                    if len(line) == 2 and isinstance(line[1], tuple):
-                        t = line[1][0]
-                        s = line[1][1]
-                        full_text += t
-                        total_score += s
-                        count += 1
-            
-            if count > 0:
-                return full_text.replace(" ", "").upper(), total_score / count
-            
-            return None, 0.0
-
-        except Exception as e:
-            # logging.error(f"Local OCR Error: {e}")
-            return None, 0.0
+        return self.ocr_service.recognize_captcha(image_bytes)
 
     def recognize_captcha_api(self, image_bytes: bytes) -> Tuple[Optional[str], float]:
         if not OCR_API_URL:
@@ -344,6 +265,18 @@ class JiangsuCCGPSearch(BaseSpider):
                     code, conf = self.recognize_captcha(r.content)
                     if code and conf >= CAPTCHA_CONFIDENCE_THRESHOLD:
                         return code
-            except Exception: pass
+                    else:
+                        if attempt % 3 == 0:
+                            self.log_info(f"OCR 识别置信度不足 ({conf:.2f} < {CAPTCHA_CONFIDENCE_THRESHOLD}) 或结果为空: {code}")
+                            try:
+                                with open(f"failed_captcha_{attempt}.jpg", "wb") as f:
+                                    f.write(r.content)
+                            except: pass
+                else:
+                    self.log_error(f"无法获取验证码图片，状态码: {r.status_code}")
+                    pass
+            except Exception as e:
+                self.log_error(f"获取/识别验证码异常: {e}")
+                pass
             time.sleep(0.5)
         return None

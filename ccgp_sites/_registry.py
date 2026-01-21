@@ -19,6 +19,8 @@ def _discover_sites() -> Dict[str, Type]:
         except Exception:
             continue
         searcher = getattr(adapter, f"{name.capitalize()}CCGPSearch", None)
+
+
         if searcher is None:
             searcher = getattr(adapter, "CCGPSearch", None)
         if searcher is None:

@@ -57,6 +57,10 @@ Search Xinjiang for "medical" in Urumqi (650100) from Jan 1st to Jan 15th 2026:
 python scripts/run_site.py xinjiang --keywords "medical" --region 650100 --start-date 2026-01-01 --end-date 2026-01-15
 ```
 
+## Testing Workflow
+
+For system integration and regression testing, see `docs/testing_workflow.md`.
+
 ## Adding a New Site
 
 1. Create a new directory `ccgp_sites/<site_name>`.
@@ -73,5 +77,4 @@ python scripts/run_site.py xinjiang --keywords "medical" --region 650100 --start
 5. Add `config.py` with default configuration.
 
 You can use `analyze_page_info_output.py` to generate a skeleton implementation if you have collected page info using `collect_page_info.py`.
-
 
