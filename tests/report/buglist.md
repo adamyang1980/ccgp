@@ -2,9 +2,9 @@
 
 ## 测试结果总结
 
-✅ **单元测试全部通过**: 26/26 测试用例 (3个OCR测试因缺少paddleocr依赖跳过)
+✅ **单元测试全部通过**: 29/29 测试用例
 
-**测试执行时间**: 2026-01-21 13:46
+**测试执行时间**: 2026-01-21 17:12
 
 ---
 
@@ -14,13 +14,13 @@
 - **原错误**: `AssertionError: assert None == 'AB'`
 - **原因**: 测试用例的 `DummyResponse` 类缺少 `raise_for_status()` 方法，导致 `ccgp_sites/jiangsu/impl.py` 中调用 `response.raise_for_status()` 时触发 `AttributeError`，异常被捕获后函数返回 `(None, 0.0)`
 - **修复方案**: 在测试的 `DummyResponse` 类中添加 `raise_for_status()` 方法
-- **状态**: ✅ 已修复
+- **状态**: ✅ 已修复 - 系统集成通过
 
 ### 2. tests/test_zhejiang_spider.py::test_extract_attachment_urls
 - **原错误**: `AssertionError: assert False` - 期望提取 `b.JPG` 但未找到
 - **原因**: `_extract_attachment_urls` 方法只允许文档类扩展名 `(pdf|doc|docx|xls|xlsx|zip|rar)`，不包含图片类型
 - **修复方案**: 修改测试用例以匹配实际业务逻辑 - 政府采购网站的附件应为文档类型，而非图片。添加 `.docx` 测试用例，并修正断言逻辑
-- **状态**: ✅ 已修复
+- **状态**: ✅ 已修复 - 系统集成通过
 
 ### 3. 新疆滑块验证码自动破解失败 (系统集成测试)
 - **原错误**: 探测阶段滑块未通过，进入 `MANUAL_REQUIRED` 状态
@@ -57,7 +57,7 @@
     - 增强数据解析逻辑：当 `data` (或 `result`) 是字典时，自动尝试查找 `children`, `list`, `records` 等可能的列表字段。
     - 替换代码中遗留的 `log_warning` 为 `log_info` 以避免 AttributeError。
   - 验证结果：成功获取列表数据 (如 Step 71 中获取 4 条数据)。
-- **状态**: ✅ 已修复
+- **状态**: ✅ 已修复 - 系统集成通过
 
 ---
 
@@ -79,4 +79,5 @@
 - JUnit XML 报告: `tests/report/junit.xml`
 - 覆盖率 HTML: `tests/report/coverage_html/index.html`
 - 覆盖率 XML: `tests/report/coverage.xml`
+
 

@@ -60,20 +60,24 @@ def test_do_probe_request_ok(tmp_path, monkeypatch):
     assert spider._do_probe_request() == "ok"
 
 
-def test_do_probe_request_slider_on_non_json(tmp_path, monkeypatch):
+def test_do_probe_request_enables_browser_mode_on_waf(tmp_path, monkeypatch):
+    """当检测到 WAF 时，应启用浏览器模式并返回 'ok'"""
     spider = _make_spider(tmp_path, monkeypatch)
     spider._http_warmed = True
 
     def fake_post(url, json=None, timeout=None):
         return DummyResponse(
             json_data={},
-            status_code=405,
-            text="aliyun_waf",
+            status_code=200,  # WAF 页面通常也是 200
+            text="aliyun_waf page content",
             headers={"content-type": "text/html"},
         )
 
     spider.session.post = fake_post
-    assert spider._do_probe_request() == "slider"
+    assert spider._use_browser_mode is False
+    result = spider._do_probe_request()
+    assert result == "ok"  # 现在返回 ok 因为浏览器模式可以处理
+    assert spider._use_browser_mode is True  # 应该启用了浏览器模式
 
 
 def test_capture_captcha_images_decodes(tmp_path, monkeypatch):
