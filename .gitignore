@@ -33,7 +33,7 @@ Desktop.ini
 # Project specific
 .agent/
 .cache/
-tests/report/
+# tests/report/ intentionally tracked for workflow summaries
 chrome_debug_profile/
 results/
 dump/
