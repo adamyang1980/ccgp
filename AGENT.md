@@ -28,7 +28,7 @@
 
 高风险区域的变更必须满足：
 - 明确的变更动机与回归策略
-- 运行 `python runtests.py` 通过
+
 - 补齐/更新离线回归测试，覆盖关键分支与边界条件
 
 ## 允许的重构范围
@@ -36,21 +36,15 @@
 - `ccgp_core/`：通用工具与运行框架
 - `ccgp_sites/*/adapter.py` 与 `ccgp_sites/*/config.py`：站点接口适配与配置整理
 - `scripts/`：入口脚本薄化、统一参数解析（不得改变站点行为）
-- `tests/`：增加系统自动化测试覆盖（允许新增文件）
+
 
 ## 安全与配置
 
 - 不要在仓库中写入任何真实 token、cookie、账号信息
 - `.env` 不应提交；只保留 `.env.example` 作为示例
 
-## 变更验证
 
-每次修改代码后至少运行：
-
-```bash
-python runtests.py
-```
 
 如果涉及站点新增/站点入口调整，额外确认：
-- `tests/test_site_contracts.py` 通过（站点契约满足）
+
 - `ccgp_sites/_registry.py` 能发现新站点

@@ -33,7 +33,7 @@ CAPTCHA_MAX_RETRIES = 10
 RETRY_BACKOFF_FACTOR = 2
 MAX_RETRY_DELAY = 60
 
-CACHE_DIR = ".cache/ccgp"
+CACHE_DIR = os.path.join(os.getcwd(), ".cache", "ccgp")
 CACHE_PAGES_DIR = os.path.join(CACHE_DIR, "pages")
 CACHE_ATTACHMENTS_DIR = os.path.join(CACHE_DIR, "attachments")
 
@@ -277,9 +277,7 @@ class JiangsuCCGPSearch(BaseSpider):
             text_results = []
             scores = []
             
-            # The test mocks returns different shapes.
-            # _FakeOCR in test returns: [{"rec_texts": ["ab"], "rec_scores": [0.9]}] for dict
-            # or [[[None, ("a", 0.6)], [None, ("b", 0.8)]]] for list
+
             
             res = result[0]
             # Handle list of lines
@@ -287,19 +285,7 @@ class JiangsuCCGPSearch(BaseSpider):
             total_score = 0.0
             count = 0
             
-            # If result is like [{'rec_texts': ...}] (legacy mock?)
-            # The test `test_recognize_captcha_local_handles_dict_output` passes `_FakeOCR([{"rec_texts": ["ab"], "rec_scores": [0.9]}])`.
-            # Real paddleocr returns list of lists.
-            # Let's support the test mock shape first.
-            
-            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
-                # FakeOCR dict mode
-                d = result[0]
-                t = "".join(d.get("rec_texts", []))
-                s = sum(d.get("rec_scores", [])) / max(1, len(d.get("rec_scores", [])))
-                return t.upper(), s
 
-            # Real PaddleOCR or list mock
             if isinstance(res, list):
                 for line in res:
                     # line structure: [points, (text, score)]
@@ -332,7 +318,7 @@ class JiangsuCCGPSearch(BaseSpider):
             response.raise_for_status()
             data = response.json()
             
-            # Expected shape from test: {"result": {"ocrResults": [{"prunedResult": {"rec_texts": ["..."], "rec_scores": [...]}}]}}
+
             results = data.get("result", {}).get("ocrResults", [])
             if results:
                 pruned = results[0].get("prunedResult", {})

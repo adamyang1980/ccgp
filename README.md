@@ -16,7 +16,7 @@ This repository provides a unified framework for scraping Chinese government pro
   - Each site folder contains `impl.py` (inherits `BaseSpider`), `config.py`.
 - `scripts/`: Entry points
   - `run_site.py`: Unified entry point for all sites.
-- `tests/`: Automated tests
+
 
 ## Usage
 
@@ -74,9 +74,4 @@ python scripts/run_site.py xinjiang --keywords "medical" --region 650100 --start
 
 You can use `analyze_page_info_output.py` to generate a skeleton implementation if you have collected page info using `collect_page_info.py`.
 
-## Testing
 
-Run unit tests:
-```bash
-python runtests.py
-```

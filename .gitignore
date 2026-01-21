@@ -29,3 +29,12 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Project specific
+.agent/
+.cache/
+tests/report/
+chrome_debug_profile/
+results/
+dump/
+error_log.txt

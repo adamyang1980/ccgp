@@ -78,13 +78,16 @@ MANUAL_CAPTCHA_MODE = os.getenv("MANUAL_CAPTCHA_MODE", "1") == "1"
 
 def launch_chrome_for_cdp():
     possible_paths = [
+        os.getenv("CHROME_BIN"),
+        os.getenv("CHROME_EXECUTABLE_PATH"),
         os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     ]
+    # Filter out None and non-existent paths
     chrome_path = None
     for path in possible_paths:
-        if os.path.exists(path):
+        if path and os.path.exists(path):
             chrome_path = path
             break
     if not chrome_path: return None
@@ -118,6 +121,7 @@ class XinjiangCCGPSearch(BaseSpider):
         self.start_date = config.get("start_date")
         self.end_date = config.get("end_date")
         self.region = config.get("region", "650000")
+        self.window_keyword = config.get("window_keyword", "新疆政府采购")
         
     def get_landing_url(self) -> str:
         return f"{self.base_url}/site/category?parentId=3661"
@@ -424,14 +428,14 @@ class XinjiangCCGPSearch(BaseSpider):
 
         if manual_mode:
              print("[验证码] 自动破解失败，请手动滑动...")
-             await WindowController.restore()
+             await WindowController.restore(self.window_keyword)
              # Wait loop
              for _ in range(30):
                  if not await slider.is_visible():
-                     await WindowController.minimize()
+                     await WindowController.minimize(self.window_keyword)
                      return True, True
                  await asyncio.sleep(1)
-             await WindowController.minimize()
+             await WindowController.minimize(self.window_keyword)
         
         return True, False
 
@@ -498,7 +502,6 @@ class XinjiangCCGPSearch(BaseSpider):
             return None
 
     def _generate_human_track(self, distance, duration=0.5):
-        # Wrapper around ccgp_core.human_track.create_human_track if available, 
-        # or inline logic to satisfy regression test of exact distance sum
+        # Wrapper around ccgp_core.human_track.create_human_track if available
         from ccgp_core.human_track import create_human_track
         return create_human_track(distance, duration=duration)
