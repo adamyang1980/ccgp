@@ -42,8 +42,15 @@
      - 策略3: 点击页面搜索按钮触发
      - 最后: 如果interactive模式，等待人工验证并检测cookies变化
 - **最新现象**: 代码更新后复测仍失败。CDP 连接成功，页面未检测到滑块且 API 探测返回 `status=200 ok=True`，但探测阶段仍判定为 `slider` 并中止。
+- **【第三轮修复】**：实现**浏览器模式**彻底解决 WAF JS 挑战问题
+  - 当探测检测到 WAF 关键词时，自动启用 `_use_browser_mode` 标志
+  - 返回 `"ok"` 继续流程（因为浏览器模式可以处理）
+  - `fetch_page_items` 检查标志，如果是浏览器模式则调用 `_fetch_page_items_browser`
+  - `_fetch_page_items_browser` 使用 Playwright 在浏览器中执行 fetch 请求，绕过 WAF JS 挑战
+  - 添加缺失的 `ensure_dir` 和 `write_json` 导入
+  - 更新测试用例以反映新的行为
 - **复现命令**: `python scripts/run_site.py xinjiang --max-pages 1 --max-results 3 --verbose`
-- **状态**: ⚠️ 未解决，已记录交由其它 AI 处理
+- **状态**: ⚠️ 未解决，交由其它 AI 处理
 
 ---
 
@@ -65,3 +72,4 @@
 - JUnit XML 报告: `tests/report/junit.xml`
 - 覆盖率 HTML: `tests/report/coverage_html/index.html`
 - 覆盖率 XML: `tests/report/coverage.xml`
+
