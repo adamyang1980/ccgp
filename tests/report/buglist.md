@@ -29,13 +29,21 @@
   2. `_detect_gap_distance` 仅使用单一边缘检测参数，准确率不足
   3. 缺少重试机制，首次失败即进入人工模式
   4. 滑动动作缺少预热移动，行为特征不够人性化
+  5. **【第二轮发现】** 阿里云滑块仅在发起API请求后才会显示，而非页面加载时
 - **修复方案**:
   1. **增强选择器适配**: 添加12种CSS选择器支持新版阿里云滑块
   2. **多算法组合检测**: 使用多种Canny边缘检测参数(50-150, 80-180, 100-200)和多种模板匹配方法(TM_CCOEFF_NORMED, TM_CCORR_NORMED)的组合
   3. **添加重试机制**: 最多3次自动重试，每次使用不同的fallback距离和滑动速度
   4. **优化滑动行为**: 添加预热鼠标移动、随机抖动、刷新按钮点击等人性化操作
   5. **增加详细日志**: 输出间隙检测置信度、缩放因子等调试信息
-- **状态**: ✅ 代码已修复 (待系统集成验证)
+  6. **【第二轮修复】** 重构 `_solve_slider_async`：
+     - 策略1: 页面加载后首先检查是否已有滑块
+     - 策略2: 在浏览器中执行 fetch API 请求触发滑块显示
+     - 策略3: 点击页面搜索按钮触发
+     - 最后: 如果interactive模式，等待人工验证并检测cookies变化
+- **最新现象**: 代码更新后复测仍失败。CDP 连接成功，页面未检测到滑块且 API 探测返回 `status=200 ok=True`，但探测阶段仍判定为 `slider` 并中止。
+- **复现命令**: `python scripts/run_site.py xinjiang --max-pages 1 --max-results 3 --verbose`
+- **状态**: ⚠️ 未解决，已记录交由其它 AI 处理
 
 ---
 
@@ -57,4 +65,3 @@
 - JUnit XML 报告: `tests/report/junit.xml`
 - 覆盖率 HTML: `tests/report/coverage_html/index.html`
 - 覆盖率 XML: `tests/report/coverage.xml`
-
