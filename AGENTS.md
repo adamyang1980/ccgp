@@ -1,39 +1,105 @@
-# Repository Guidelines
+# PROJECT KNOWLEDGE BASE (CCGP)
 
-## Project Structure & Module Organization
-- `ccgp_core/` holds the shared framework (spider base class, pipeline, anti-bot, OCR, runtime utilities).
-- `ccgp_sites/<site>/` contains site implementations (`impl.py`) plus site config/adapters (`config.py`, `adapter.py`).
-- `scripts/` contains entry points such as `scripts/run_site.py`.
-- `tests/` contains pytest-based regression tests.
-- `docs/` and root-level helper scripts/images are used for debugging and OCR/captcha analysis.
+Generated: 2026-01-23
+Branch: main
+Commit: 8e9b08a
 
-## Build, Test, and Development Commands
-- `python scripts/run_site.py jiangsu` runs the Jiangsu scraper via the unified entry point.
-- `python scripts/run_site.py xinjiang --start-date 2026-01-01 --end-date 2026-01-15` runs Xinjiang with date filters.
-- `pytest` runs the full test suite in `tests/`.
-- `python collect_page_info.py` and `python analyze_page_info_output.py` help scaffold new site implementations.
+Unified China Government Procurement scraping framework (Python).
+Primary entrypoint: `scripts/run_site.py` (sites: jiangsu/xinjiang/zhejiang).
 
-## Coding Style & Naming Conventions
-- Use Python PEP 8 conventions with 4-space indentation.
-- Name classes in `CapWords`, functions/variables in `snake_case`, and constants in `UPPER_SNAKE_CASE`.
-- Keep site-specific logic inside the relevant `ccgp_sites/<site>/` module and share utilities through `ccgp_core/`.
-- Favor explicit parameters and small helper methods for request/parse steps to ease debugging.
+## Canonical Rules (Must Follow)
+- AI/dev rules live in `.agent/rules/` (treat as source of truth).
+- High-risk edits require regression tests first (see `.agent/rules/core.md`).
+- Do not commit secrets; do not commit `.env` (keep `.env.example` only).
 
-## Testing Guidelines
-- Tests live in `tests/` and follow `test_*.py` file naming and `test_*` function naming.
-- Use pytest fixtures/mocks for external calls; avoid network access in unit tests.
-- Run tests inside the conda env: `conda activate web` then `python -m pytest`.
-- When touching captcha or anti-bot logic, add or update regression tests to cover edge cases.
+## Repo Structure (Human Map)
+ccgp/
+- `.agent/` assistant rules and workflows
+- `ccgp_core/` core framework (BaseSpider lifecycle, antibot/checkpoints, OCR, output)
+- `ccgp_sites/` site implementations (auto-discovered registry + per-site spiders)
+- `scripts/` CLI entrypoints + test workflow helper (MUST remain thin)
+- `tests/` pytest regression/unit tests (avoid real network/browser)
+- `docs/` engineering docs (testing workflow, slider optimization)
+- `results/` scrape outputs (generated; not source)
 
-## Commit & Pull Request Guidelines
-- Commit history follows Conventional Commits (`feat: ...`, `fix: ...`, `chore: ...`); keep subjects short and scoped.
-- PRs should include a brief summary, relevant test commands run (e.g., `pytest`), and sample run parameters if behavior changes.
-- Link related issues and include logs/screenshots when changes affect captcha or browser flows.
+## Where To Look (Task -> Location)
+| Task | Location |
+|------|----------|
+| Unified CLI + config wiring | `scripts/run_site.py` |
+| Site discovery + registry logic | `ccgp_sites/_registry.py` |
+| Base crawler lifecycle (probe/search/details) | `ccgp_core/spider.py` |
+| Antibot state machine + checkpointing | `ccgp_core/antibot.py`, `ccgp_core/runtime.py` |
+| Output writing + filename safety | `ccgp_core/output.py`, `ccgp_core/fs.py` |
+| Request fingerprinting + random delays | `ccgp_core/request_fingerprint.py` |
+| OCR service | `ccgp_core/ocr_service.py`, `tests/test_ocr_service.py`, `debug_ocr.py` |
+| Jiangsu site (OCR captcha) | `ccgp_sites/jiangsu/impl.py` |
+| Xinjiang site (slider + Playwright) | `ccgp_sites/xinjiang/impl.py` |
+| Zhejiang site (API) | `ccgp_sites/zhejiang/impl.py` |
+| Test workflow docs | `docs/testing_workflow.md`, `.agent/workflows/test-cycle.md` |
+| Slider behavior analysis | `docs/slider_captcha_optimization.md` |
 
-## Security & Configuration Tips
-- Do not commit real tokens, cookies, or credentials; keep secrets in local `.env` only.
-- If configuration changes are needed, update `.env.example` and document new keys.
+## AGENTS.md Hierarchy
+- `AGENTS.md` (this file)
+- `ccgp_core/AGENTS.md`
+- `ccgp_sites/AGENTS.md`
+- `ccgp_sites/jiangsu/AGENTS.md`
+- `ccgp_sites/xinjiang/AGENTS.md`
+- `ccgp_sites/zhejiang/AGENTS.md`
+- `scripts/AGENTS.md`
+- `tests/AGENTS.md`
 
-## Agent-Specific Guardrails
-- Follow `AGENT.md` for high-risk areas (Jiangsu captcha and Xinjiang slider/browser logic); any changes require clear motivation and regression coverage.
-- If adding a new site or changing entry points, ensure `ccgp_sites/_registry.py` can discover it.
+## High-Risk Areas (Changes Need Tests + Clear Rationale)
+- Jiangsu (`ccgp_sites/jiangsu/impl.py`)
+  - `recognize_captcha_local`, `recognize_captcha_api`, `recognize_captcha`, `get_captcha`
+- Xinjiang (`ccgp_sites/xinjiang/impl.py`)
+  - `_handle_slider_captcha`, `_capture_captcha_images`, `_detect_gap_distance`
+  - `_generate_human_track`, `_solve_slider_async`
+
+## Commands (Local)
+Run a site:
+- `python scripts/run_site.py <site> [args]`
+Examples:
+- `python scripts/run_site.py jiangsu`
+- `python scripts/run_site.py xinjiang --start-date 2026-01-01 --end-date 2026-01-15`
+- `python scripts/run_site.py zhejiang --keywords "医疗" "设备"`
+
+Common args:
+- `--start-date`, `--end-date`, `--region`, `--keywords`
+- `--max-pages` (default 100), `--max-results` (default 1000)
+- `--secondary-filter` (optional secondary keyword filter)
+- `--resume` (checkpoint resume)
+- `--non-interactive` (for CI/cron)
+- `--verbose`
+
+Run tests:
+- `python -m pytest`
+- `python -m pytest tests/test_jiangsu_spider.py -v`
+
+Test-cycle helper (optional):
+- `python scripts/test_cycle_helper.py init`
+- `python scripts/test_cycle_helper.py parse`
+- `python scripts/test_cycle_helper.py summary`
+
+## Conventions (Project-Specific)
+- Naming:
+  - Classes: `PascalCase` (e.g. `JiangsuCCGPSearch`)
+  - Functions/vars: `snake_case`
+  - Constants: `UPPER_SNAKE_CASE`
+- Site module layout (per site dir):
+  - `impl.py`: actual spider class inheriting `BaseSpider`
+  - `adapter.py`: re-export spider class for registry discovery
+  - `config.py`: default config
+- Testing:
+  - Use pytest; avoid real network requests; prefer mocks/monkeypatch.
+
+## Hard Rules / Anti-Patterns
+- Do not change scraping behavior from `scripts/` (only CLI parsing/UX improvements). See `.agent/rules/core.md`.
+- Do not add or commit secrets (tokens/cookies/passwords).
+- Do not treat generated directories as source:
+  - `results/` (scrape output)
+  - `tests/report/` (reports/coverage)
+  - `chrome_debug_profile/` (local browser artifacts)
+
+## Notes / Gotchas
+- Xinjiang uses Playwright + asyncio in `ccgp_sites/xinjiang/impl.py`; keep async boundaries clear and mockable.
+- `BaseSpider` writes incremental `search_results.json` and details under `results/<site>/.../details/` (see `docs/testing_workflow.md`).
