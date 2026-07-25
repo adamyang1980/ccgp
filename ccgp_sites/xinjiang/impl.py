@@ -1,18 +1,14 @@
 import asyncio
-import ctypes
-import html
 import json
 import logging
 import os
+import platform
 import random
-import re
 import subprocess
-import sys
 import time
-from ctypes import windll, wintypes
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -25,14 +21,20 @@ from ccgp_core.fs import sanitize_filename
 from ccgp_core.human_track import create_human_track
 from ccgp_core.output import ensure_dir, write_json
 from ccgp_core.spider import BaseSpider
+from ccgp_sites.xinjiang.config import DEFAULT_ARGS
 
-# --- Window Controller helper ---
+# --- Window Controller helper (Windows only, graceful degradation) ---
+_IS_WINDOWS = platform.system() == "Windows"
 SW_SHOWMINNOACTIVE = 7
 SW_RESTORE = 9
 
 class WindowController:
     @staticmethod
     def find_window(keyword="新疆政府采购"):
+        if not _IS_WINDOWS:
+            return None
+        import ctypes
+        from ctypes import windll, wintypes
         found_hwnds = []
         def callback(hwnd, section):
             length = windll.user32.GetWindowTextLengthW(hwnd)
@@ -49,6 +51,9 @@ class WindowController:
 
     @staticmethod
     def ensure_minimized(keyword="新疆政府采购"):
+        if not _IS_WINDOWS:
+            return False
+        from ctypes import windll
         hwnd = WindowController.find_window(keyword)
         if not hwnd: hwnd = WindowController.find_window("Google Chrome")
         if hwnd:
@@ -59,6 +64,9 @@ class WindowController:
 
     @staticmethod
     def restore(keyword="新疆政府采购"):
+        if not _IS_WINDOWS:
+            return False
+        from ctypes import windll
         hwnd = WindowController.find_window(keyword)
         if not hwnd: hwnd = WindowController.find_window("Google Chrome")
         if hwnd:
@@ -74,8 +82,6 @@ class WindowController:
 load_dotenv()
 _env_cdp = os.getenv("CHROME_CDP_URL")
 CHROME_CDP_URL = _env_cdp if _env_cdp else ""
-DETAIL_RENDER_TIMEOUT_MS = 20000
-MANUAL_CAPTCHA_MODE = os.getenv("MANUAL_CAPTCHA_MODE", "1") == "1"
 
 def launch_chrome_for_cdp():
     possible_paths = [
@@ -104,11 +110,13 @@ def launch_chrome_for_cdp():
             time.sleep(1)
             if WindowController.ensure_minimized(): break
         return "http://127.0.0.1:9222"
-    except: return None
+    except Exception: return None
 
 class XinjiangCCGPSearch(BaseSpider):
     def __init__(self, config: Dict[str, Any]):
-        super().__init__("xinjiang", config)
+        # 合并默认配置
+        merged = {**DEFAULT_ARGS, **config}
+        super().__init__("xinjiang", merged)
         self.base_url = "http://www.ccgp-xinjiang.gov.cn"
         self.api_url = f"{self.base_url}/portal/category"
         self.session.headers.update({
@@ -122,6 +130,14 @@ class XinjiangCCGPSearch(BaseSpider):
         self._use_browser_mode = False
         self._browser_context = None
         
+        # Playwright 连接复用
+        self._playwright = None
+        self._browser = None
+        self._pw_context = None
+        
+        # 缓存 items 用于 fetch_detail 按 ID 查找
+        self._items_cache: Dict[str, Dict[str, Any]] = {}
+        
         # Params
         self.start_date = config.get("start_date")
         self.end_date = config.get("end_date")
@@ -131,11 +147,77 @@ class XinjiangCCGPSearch(BaseSpider):
     def get_landing_url(self) -> str:
         return f"{self.base_url}/site/category?parentId=3661"
 
+    async def _ensure_browser(self):
+        """确保 Playwright 浏览器连接可用（复用连接）"""
+        global CHROME_CDP_URL
+        if not CHROME_CDP_URL:
+            CHROME_CDP_URL = launch_chrome_for_cdp()
+            if not CHROME_CDP_URL:
+                raise RuntimeError("无法启动 Chrome")
+        
+        if self._browser is None or not self._browser.is_connected():
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.connect_over_cdp(CHROME_CDP_URL)
+            if self._browser.contexts:
+                self._pw_context = self._browser.contexts[0]
+            else:
+                self._pw_context = await self._browser.new_context()
+        return self._pw_context
+
+    async def close_browser(self):
+        """清理 Playwright 资源"""
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+        except Exception:
+            pass
+        self._browser = None
+        self._playwright = None
+        self._pw_context = None
+
+    def _run_async(self, coro):
+        """运行异步协程，处理 Windows ProactorEventLoop 子进程管道清理。
+
+        Playwright 通过子进程管道与浏览器通信，事件循环关闭后残留的
+        传输对象在 GC 时可能触发 ValueError。此方法在每次运行后重置
+        浏览器引用，并在 Windows 上抑制该无害警告。
+        """
+        try:
+            return asyncio.run(coro)
+        finally:
+            # 事件循环已关闭，Playwright 连接不可能跨循环复用，无条件重置引用
+            self._browser = None
+            self._playwright = None
+            self._pw_context = None
+            # Windows: 抑制管道传输 GC 时的 ValueError
+            if _IS_WINDOWS:
+                import gc
+                import sys as _sys
+                _orig_hook = _sys.unraisablehook
+
+                def _quiet_hook(unraisable):
+                    if (isinstance(unraisable.exc_value, ValueError)
+                            and "closed pipe" in str(unraisable.exc_value)):
+                        return  # 静默已知的管道关闭警告
+                    _orig_hook(unraisable)
+
+                _sys.unraisablehook = _quiet_hook
+                try:
+                    gc.collect()
+                finally:
+                    _sys.unraisablehook = _orig_hook
+
     def _ensure_http_warmed(self):
         if self._http_warmed: return
         try:
              self.session.get(self.get_landing_url(), timeout=15)
-        except: pass
+        except Exception: pass
         self._http_warmed = True
 
     def _do_probe_request(self) -> str:
@@ -213,7 +295,7 @@ class XinjiangCCGPSearch(BaseSpider):
             self.log_error("Could not launch Chrome for CDP.")
             return False
 
-        return asyncio.run(self._solve_slider_async())
+        return self._run_async(self._solve_slider_async())
 
     async def _solve_slider_async(self):
         """
@@ -251,34 +333,34 @@ class XinjiangCCGPSearch(BaseSpider):
                         
                         # 在浏览器中执行 fetch 请求来触发阿里云滑块
                         payload = self._build_search_payload(1)
-                        trigger_js = f"""
-                        async () => {{
-                            try {{
-                                const response = await fetch('{self.api_url}', {{
+                        trigger_js = """
+                        async (args) => {
+                            try {
+                                const response = await fetch(args.url, {
                                     method: 'POST',
-                                    headers: {{
+                                    headers: {
                                         'Content-Type': 'application/json',
                                         'Accept': 'application/json, text/plain, */*',
                                         'X-Requested-With': 'XMLHttpRequest'
-                                    }},
-                                    body: JSON.stringify({json.dumps(payload)})
-                                }});
+                                    },
+                                    body: JSON.stringify(args.payload)
+                                });
                                 
                                 const text = await response.text();
-                                return {{
+                                return {
                                     status: response.status,
                                     ok: response.ok,
                                     contentType: response.headers.get('content-type') || '',
                                     bodyPreview: text.substring(0, 500)
-                                }};
-                            }} catch (e) {{
-                                return {{error: e.toString()}};
-                            }}
-                        }}
+                                };
+                            } catch (e) {
+                                return {error: e.toString()};
+                            }
+                        }
                         """
                         
                         try:
-                            result = await page.evaluate(trigger_js)
+                            result = await page.evaluate(trigger_js, {"url": self.api_url, "payload": payload})
                             self.log_info(f"[滑块] API 请求结果: status={result.get('status')}, ok={result.get('ok')}")
                             
                             if result.get('error'):
@@ -364,7 +446,7 @@ class XinjiangCCGPSearch(BaseSpider):
         如果启用了浏览器模式，使用 Playwright 获取；否则使用 HTTP Session。
         """
         if self._use_browser_mode:
-            return asyncio.run(self._fetch_page_items_browser(page_no))
+            return self._run_async(self._fetch_page_items_browser(page_no))
         
         # HTTP 模式
         payload = self._build_search_payload(page_no)
@@ -377,7 +459,7 @@ class XinjiangCCGPSearch(BaseSpider):
             if "json" not in ct or "aliyun" in r.text[:1000].lower():
                 self.log_info("[获取] HTTP 请求被 WAF 拦截，切换到浏览器模式")
                 self._use_browser_mode = True
-                return asyncio.run(self._fetch_page_items_browser(page_no))
+                return self._run_async(self._fetch_page_items_browser(page_no))
             
             data = r.json()
             if data:
@@ -388,7 +470,7 @@ class XinjiangCCGPSearch(BaseSpider):
             self.log_error(f"Fetch page HTTP failed: {e}")
             # 尝试使用浏览器模式
             self._use_browser_mode = True
-            return asyncio.run(self._fetch_page_items_browser(page_no))
+            return self._run_async(self._fetch_page_items_browser(page_no))
 
         # Normalization
         for item in items:
@@ -402,158 +484,143 @@ class XinjiangCCGPSearch(BaseSpider):
         """
         使用 Playwright 浏览器获取列表页数据（绕过 WAF JS 挑战）
         """
-        global CHROME_CDP_URL
-        
-        # 确保 Chrome 已启动
-        if not CHROME_CDP_URL:
-            self.log_info("[浏览器模式] Chrome 未启动，正在启动...")
-            CHROME_CDP_URL = launch_chrome_for_cdp()
-            if not CHROME_CDP_URL:
-                self.log_error("[浏览器模式] 无法启动 Chrome")
-                return []
-            self.log_info(f"[浏览器模式] Chrome 启动成功: {CHROME_CDP_URL}")
-        
         self.log_info(f"[浏览器模式] 获取第 {page_no} 页数据...")
         
         payload = self._build_search_payload(page_no)
         items = []
         
-        async with async_playwright() as p:
+        try:
+            context = await self._ensure_browser()
+        except Exception as e:
+            self.log_error(f"[浏览器模式] 无法连接浏览器: {e}")
+            return []
+        
+        page = await context.new_page()
+        try:
+            await page.goto(self.get_landing_url(), timeout=30000, wait_until="domcontentloaded")
+            await asyncio.sleep(1)
+            
+            # 模拟人类行为：滚动和点击，增加真实感
             try:
-                browser = await p.chromium.connect_over_cdp(CHROME_CDP_URL)
-                if browser.contexts:
-                    context = browser.contexts[0]
-                else:
-                    context = await browser.new_context()
-                
-                page = await context.new_page()
+                await page.evaluate("window.scrollTo({top: 100, behavior: 'smooth'})")
+                await asyncio.sleep(0.5)
+                await page.mouse.move(100, 100)
+                await page.mouse.click(100, 100)
+            except Exception: pass
+
+            result = {}
+            if page_no == 1:
+                self.log_info("[浏览器模式] 尝试通过页面交互捕获真实 API 请求...")
                 try:
-                    await page.goto(self.get_landing_url(), timeout=30000, wait_until="domcontentloaded")
-                    await asyncio.sleep(1)
+                    # 尝试点击搜索并拦截请求
+                    async with page.expect_response(
+                        lambda r: r.status == 200 and r.request.method == "POST" and "json" in r.headers.get("content-type", "").lower() and len(r.url) > 20,
+                        timeout=60000
+                    ) as response_info:
+                        search_clicked = False
+                        for sel in [".search-btn", ".btn-search", "button[type='button']", "input[type='submit']", ".icon-search"]:
+                            if await page.is_visible(sel):
+                                await page.click(sel)
+                                search_clicked = True
+                                break
+                        if not search_clicked:
+                            self.log_info("[浏览器模式] Warning: 未找到搜索按钮，等待可能自动发出的请求...")
                     
-                    # 模拟人类行为：滚动和点击，增加真实感
-                    try:
-                        await page.evaluate("window.scrollTo({top: 100, behavior: 'smooth'})")
-                        await asyncio.sleep(0.5)
-                        await page.mouse.move(100, 100)
-                        await page.mouse.click(100, 100)
-                    except: pass
+                    response = await response_info.value
+                    self.log_info(f"[浏览器模式] 捕获到真实 API URL: {response.url}")
+                    self.api_url = response.url
+                    json_data = await response.json()
+                    result = {"success": True, "data": json_data}
+                except Exception as capture_err:
+                    self.log_info(f"[浏览器模式] Warning: 捕获请求超时或失败: {capture_err}，尝试回退到 fetch")
 
-                    result = {}
-                    if page_no == 1:
-                        self.log_info("[浏览器模式] 尝试通过页面交互捕获真实 API 请求...")
-                        try:
-                            # 尝试点击搜索并拦截请求
-                            async with page.expect_response(
-                                lambda r: r.status == 200 and r.request.method == "POST" and "json" in r.headers.get("content-type", "").lower() and len(r.url) > 20,
-                                timeout=60000
-                            ) as response_info:
-                                search_clicked = False
-                                for sel in [".search-btn", ".btn-search", "button[type='button']", "input[type='submit']", ".icon-search"]:
-                                    if await page.is_visible(sel):
-                                        await page.click(sel)
-                                        search_clicked = True
-                                        break
-                                if not search_clicked:
-                                    self.log_info("[浏览器模式] Warning: 未找到搜索按钮，等待可能自动发出的请求...")
-                            
-                            response = await response_info.value
-                            self.log_info(f"[浏览器模式] 捕获到真实 API URL: {response.url}")
-                            self.api_url = response.url
-                            json_data = await response.json()
-                            result = {"success": True, "data": json_data}
-                        except Exception as capture_err:
-                            self.log_info(f"[浏览器模式] Warning: 捕获请求超时或失败: {capture_err}，尝试回退到 fetch")
-
-                    if not result.get("success"):
-                        # 使用 json.dumps 确保 JS 代码安全
-                        payload_json = json.dumps(payload)
-                        fetch_js = """
-                        async () => {
-                            try {
-                                const response = await fetch('""" + self.api_url + """', {
-                                    method: 'POST',
-                                    headers: {
-                                        'Content-Type': 'application/json',
-                                        'Accept': 'application/json, text/plain, */*',
-                                        'X-Requested-With': 'XMLHttpRequest'
-                                    },
-                                    body: JSON.stringify(""" + payload_json + """)
-                                });
-                                
-                                if (!response.ok) {
-                                    return {error: 'HTTP ' + response.status};
-                                }
-                                
-                                const data = await response.json();
-                                return {success: true, data: data};
-                            } catch (e) {
-                                return {error: e.toString()};
-                            }
+            if not result.get("success"):
+                # 使用参数化 evaluate 避免 JS 注入
+                fetch_js = """
+                async (args) => {
+                    try {
+                        const response = await fetch(args.url, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json, text/plain, */*',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            },
+                            body: JSON.stringify(args.payload)
+                        });
+                        
+                        if (!response.ok) {
+                            return {error: 'HTTP ' + response.status};
                         }
-                        """
                         
-                        self.log_info(f"[浏览器模式] 执行 API 请求 (URL: {self.api_url})...")
-                        result = await page.evaluate(fetch_js)
-                    
-                    if not isinstance(result, dict):
-                        self.log_error(f"[浏览器模式] 异常：evaluate返回非字典类型 {type(result)}")
-                        return []
-                    
-                    if result.get("error"):
-                        self.log_error(f"[浏览器模式] API 请求失败: {result.get('error')}")
-                        
-                        # 检查是否需要处理滑块
-                        found, passed = await self._handle_slider_captcha(page, manual_mode=self.interactive)
-                        if found and not passed:
-                            self.log_error("[浏览器模式] 滑块验证失败")
-                            return []
-                        
-                        # 重试请求
-                        await asyncio.sleep(1)
-                        result = await page.evaluate(fetch_js)
-                        
-                        if not isinstance(result, dict) or result.get("error"):
-                            self.log_error(f"[浏览器模式] 重试失败: {result.get('error') if isinstance(result, dict) else result}")
-                            return []
-                    
-                    if result.get("success"):
-                        data = result.get("data")
-                        if isinstance(data, dict):
-                            res = data.get("result")
-                            if isinstance(res, dict):
-                                raw_items = res.get("data")
-                                if isinstance(raw_items, list):
-                                    items = [i for i in raw_items if isinstance(i, dict)]
-                                elif isinstance(raw_items, dict):
-                                    self.log_info(f"[浏览器模式] res['data'] 是字典，尝试查找列表字段 (keys: {list(raw_items.keys())})")
-                                    possible_keys = ["data", "records", "rows", "list", "content", "result", "children"]
-                                    found_list = None
-                                    for k in possible_keys:
-                                        if isinstance(raw_items.get(k), list):
-                                            found_list = raw_items.get(k)
-                                            break
-                                    
-                                    if found_list is not None:
-                                        items = [i for i in found_list if isinstance(i, dict)]
-                                    else:
-                                        self.log_error(f"[浏览器模式] 无法在 res['data'] 中找到列表数据")
-                                else:
-                                    self.log_error(f"[浏览器模式] res['data'] 不是列表: {type(raw_items)}")
+                        const data = await response.json();
+                        return {success: true, data: data};
+                    } catch (e) {
+                        return {error: e.toString()};
+                    }
+                }
+                """
+                fetch_args = {"url": self.api_url, "payload": payload}
+                
+                self.log_info(f"[浏览器模式] 执行 API 请求 (URL: {self.api_url})...")
+                result = await page.evaluate(fetch_js, fetch_args)
+            
+            if not isinstance(result, dict):
+                self.log_error(f"[浏览器模式] 异常：evaluate返回非字典类型 {type(result)}")
+                return []
+            
+            if result.get("error"):
+                self.log_error(f"[浏览器模式] API 请求失败: {result.get('error')}")
+                
+                # 检查是否需要处理滑块
+                found, passed = await self._handle_slider_captcha(page, manual_mode=self.interactive)
+                if found and not passed:
+                    self.log_error("[浏览器模式] 滑块验证失败")
+                    return []
+                
+                # 重试请求
+                await asyncio.sleep(1)
+                result = await page.evaluate(fetch_js, fetch_args)
+                
+                if not isinstance(result, dict) or result.get("error"):
+                    self.log_error(f"[浏览器模式] 重试失败: {result.get('error') if isinstance(result, dict) else result}")
+                    return []
+            
+            if result.get("success"):
+                data = result.get("data")
+                if isinstance(data, dict):
+                    res = data.get("result")
+                    if isinstance(res, dict):
+                        raw_items = res.get("data")
+                        if isinstance(raw_items, list):
+                            items = [i for i in raw_items if isinstance(i, dict)]
+                        elif isinstance(raw_items, dict):
+                            self.log_info(f"[浏览器模式] res['data'] 是字典，尝试查找列表字段 (keys: {list(raw_items.keys())})")
+                            possible_keys = ["data", "records", "rows", "list", "content", "result", "children"]
+                            found_list = None
+                            for k in possible_keys:
+                                if isinstance(raw_items.get(k), list):
+                                    found_list = raw_items.get(k)
+                                    break
+                            
+                            if found_list is not None:
+                                items = [i for i in found_list if isinstance(i, dict)]
                             else:
-                                self.log_error(f"[浏览器模式] data['result'] 不是字典: {type(res)}")
+                                self.log_error(f"[浏览器模式] 无法在 res['data'] 中找到列表数据")
                         else:
-                            self.log_error(f"[浏览器模式] result['data'] 不是字典: {type(data)}")
-                        
-                        self.log_info(f"[浏览器模式] 获取到 {len(items)} 条数据")
-                    
-                finally:
-                    await page.close()
-                    
-            except Exception as e:
-                self.log_error(f"[浏览器模式] 异常: {e}")
-                import traceback
-                traceback.print_exc()
+                            self.log_error(f"[浏览器模式] res['data'] 不是列表: {type(raw_items)}")
+                    else:
+                        self.log_error(f"[浏览器模式] data['result'] 不是字典: {type(res)}")
+                else:
+                    self.log_error(f"[浏览器模式] result['data'] 不是字典: {type(data)}")
+                
+                self.log_info(f"[浏览器模式] 获取到 {len(items)} 条数据")
+        except Exception as e:
+            self.log_error(f"[浏览器模式] 异常: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            await page.close()
         
         # Normalization
         for item in items:
@@ -585,42 +652,34 @@ class XinjiangCCGPSearch(BaseSpider):
         pd = item.get("publishDate")
         if pd:
              try: return int(pd)
-             except: pass
+             except Exception: pass
         return None
 
     def extract_item_id(self, item: Dict[str, Any]) -> str:
          return str(item.get("articleId", "")) or str(item.get("id", ""))
 
     def fetch_detail(self, item_id: str) -> Dict[str, Any]:
-        # Using item_id alone is hard because Xinjiang detail URL construction needs params
-        # BaseSpider flow passes item_id. But our BaseSpider implementation in process_details
-        # calls fetch_detail(item_id). 
-        # But Xinjiang needs announcementUrl or other params from list item.
-        # So I might need to override process_details in BaseSpider to pass full item?
-        # OR, I can cache items in a dict in this class?
-        # Actually BaseSpider::process_details iterates items and calls fetch_detail.
-        # I should simply store 'current_item' or just use URL if possible.
-        # Wait, BaseSpider.process_details calls: detail_data = self.fetch_detail(item_id)
-        # This is a bit restrictive for detailed flow. 
-        # I will hack it by storing the items map or overriding process_details.
-        # But wait, BaseSpider::process_details is:
-        # for idx, item in enumerate(collected): ... fetch_detail(item_id)
-        # I previously implemented fetch_detail taking only item_id.
+        """从 _items_cache 中查找 item 并通过 HTTP 获取详情。
         
-        # Let's override process_details in this subclass to be safe, or just utilize the fact that
-        # I can look up the item from `self.collected` (if I had access).
-        # Actually, `fetch_detail` in my BaseSpider definition takes `item_id`.
-        # I will implement `fetch_detail` to return empty wrapper and do the real work in `save_detail`
-        # OR, better: `BaseSpider` passes `item` to `save_detail`, but `fetch_detail` only gets ID.
-        
-        # NOTE: I will override `process_details` to handle the complexity of Xinjiang where
-        # we might need to use Playwright to fetch detail if HTTP fails.
-        raise NotImplementedError("Overridden process_details")
+        注意：本类同时重写了 process_details 以支持浏览器 fallback，
+        此实现保证 fetch_detail 契约完整（BaseSpider 可能在重试时调用）。
+        """
+        item = self._items_cache.get(str(item_id))
+        if not item:
+            self.log_error(f"fetch_detail: item {item_id} not found in cache")
+            return {}
+        return self._get_detail_http(item)
 
     def process_details(self, collected: List[Dict[str, Any]]):
         details_dir = os.path.join(self.out_dir, "details")
         ensure_dir(details_dir)
         done_ids = set(self.ctx.checkpoint.get("detail_done_ids", []))
+
+        # 填充 _items_cache 以支持 fetch_detail 按 ID 查找
+        for item in collected:
+            iid = self.extract_item_id(item)
+            if iid:
+                self._items_cache[str(iid)] = item
 
         for idx, item in enumerate(collected):
             item_id = self.extract_item_id(item)
@@ -640,7 +699,7 @@ class XinjiangCCGPSearch(BaseSpider):
                  try:
                      # ensure CDP
                      if not CHROME_CDP_URL: launch_chrome_for_cdp()
-                     detail_data = asyncio.run(self.get_detail_with_playwright(item))
+                     detail_data = self._run_async(self.get_detail_with_playwright(item))
                  except Exception as e:
                      self.log_error(f"Browser detail fetch failed: {e}")
 
@@ -683,25 +742,23 @@ class XinjiangCCGPSearch(BaseSpider):
     async def get_detail_with_playwright(self, item):
          url = item.get("detail_url") or item.get("announcementUrl")
          if not url: return {}
-         async with async_playwright() as p:
-             browser = await p.chromium.connect_over_cdp(CHROME_CDP_URL)
-             context = browser.contexts[0] if browser.contexts else await browser.new_context()
-             page = await context.new_page()
+         context = await self._ensure_browser()
+         page = await context.new_page()
+         try:
+             await page.goto(url, timeout=40000, wait_until="domcontentloaded")
+             
+             # Check captcha
+             found, passed = await self._handle_slider_captcha(page)
+             if found and not passed: return {} # Failed
+             
+             # Wait for content
              try:
-                 await page.goto(url, timeout=40000, wait_until="domcontentloaded")
-                 
-                 # Check captcha
-                 found, passed = await self._handle_slider_captcha(page)
-                 if found and not passed: return {} # Failed
-                 
-                 # Wait for content
-                 try:
-                      await page.wait_for_selector(".detail-content", timeout=10000)
-                 except: pass
-                 
-                 return {"html": await page.content(), "final_url": page.url}
-             finally:
-                 await page.close()
+                  await page.wait_for_selector(".detail-content", timeout=10000)
+             except Exception: pass
+             
+             return {"html": await page.content(), "final_url": page.url}
+         finally:
+             await page.close()
 
     # --- Slider Logic (Enhanced) ---
     async def _handle_slider_captcha(self, page, manual_mode=False, max_retries=3):
@@ -778,7 +835,7 @@ class XinjiangCCGPSearch(BaseSpider):
                                 bg_el = await page.query_selector(bg_sel)
                                 if bg_el:
                                     break
-                            except:
+                            except Exception:
                                 pass
                         
                         if bg_el:
@@ -844,7 +901,7 @@ class XinjiangCCGPSearch(BaseSpider):
             slider_still_visible = False
             try:
                 slider_still_visible = await page.is_visible(matched_selector)
-            except:
+            except Exception:
                 pass
             
             if not slider_still_visible:
@@ -864,7 +921,7 @@ class XinjiangCCGPSearch(BaseSpider):
                     if await page.is_visible(err_sel):
                         has_error = True
                         break
-                except:
+                except Exception:
                     pass
             
             if has_error:
@@ -884,7 +941,7 @@ class XinjiangCCGPSearch(BaseSpider):
                     if refresh_btn and await refresh_btn.is_visible():
                         await refresh_btn.click()
                         await asyncio.sleep(1)
-                except:
+                except Exception:
                     pass
 
         # 所有自动尝试失败
@@ -901,7 +958,7 @@ class XinjiangCCGPSearch(BaseSpider):
                         WindowController.minimize(self.window_keyword)
                         self.log_info("[滑块] ✓ 人工验证成功！")
                         return True, True
-                except:
+                except Exception:
                     pass
                 await asyncio.sleep(1)
             

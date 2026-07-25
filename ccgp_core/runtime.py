@@ -1,9 +1,9 @@
-import os
-from typing import Any, Dict, Optional
+import sys
+from typing import Any, Dict
 
 
-def run_searcher(searcher: Any, config: Dict[str, Any]) -> bool:
-    return bool(searcher.run(**config))
+def run_searcher(searcher: Any) -> bool:
+    return bool(searcher.run())
 
 
 def print_final_message(success: bool) -> None:
@@ -18,5 +18,5 @@ def exit_code(success: bool) -> int:
 
 
 def os_exit(success: bool) -> None:
-    os._exit(exit_code(success))
+    sys.exit(exit_code(success))
 

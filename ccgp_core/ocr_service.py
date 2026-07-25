@@ -67,7 +67,7 @@ class OCRService:
         # PaddleOCR usually handles resizing internally, but slightly larger text helps.
         w, h = image.size
         # Scaling up by 2x
-        image = image.resize((w * 2, h * 2), Image.BILINEAR)
+        image = image.resize((w * 2, h * 2), Image.Resampling.BILINEAR)
         
         return image
 

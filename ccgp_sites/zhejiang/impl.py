@@ -2,7 +2,6 @@ import json
 import os
 import re
 import time
-from datetime import datetime
 from html import unescape
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse

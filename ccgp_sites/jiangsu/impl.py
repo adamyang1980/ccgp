@@ -1,24 +1,21 @@
 import base64
-import json
-import logging
 import os
-import re
-import shutil
 import time
-import warnings
-from datetime import datetime, timedelta
-from io import BytesIO
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import requests
 import urllib3
-from PIL import Image, ImageEnhance, ImageFilter
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from urllib3.exceptions import InsecureRequestWarning
 
 from ccgp_core.fs import sanitize_filename
 from ccgp_core.output import ensure_dir, write_json
 from ccgp_core.spider import BaseSpider
+from ccgp_sites.jiangsu.config import DEFAULT_CONFIG
 
 urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -37,7 +34,9 @@ CACHE_ATTACHMENTS_DIR = os.path.join(CACHE_DIR, "attachments")
 
 class JiangsuCCGPSearch(BaseSpider):
     def __init__(self, config: Dict[str, Any]):
-        super().__init__("jiangsu", config)
+        # 合并默认配置
+        merged = {**DEFAULT_CONFIG, **config}
+        super().__init__("jiangsu", merged)
         self.base_url = "http://www.ccgp-jiangsu.gov.cn"
         self.search_page_url = f"{self.base_url}/jiangsu/cggg_search.html?lmid=cggg&qh=notic_c4"
         self.search_url = f"{self.base_url}/pss/jsp/search_cggg.jsp"
@@ -85,7 +84,7 @@ class JiangsuCCGPSearch(BaseSpider):
             if end_of_day:
                 dt = dt.replace(hour=23, minute=59, second=59)
             return int(dt.timestamp() * 1000)
-        except:
+        except Exception:
              return 0 if not end_of_day else int(time.time() * 1000)
 
     def get_landing_url(self) -> str:
@@ -163,7 +162,7 @@ class JiangsuCCGPSearch(BaseSpider):
             for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
                 try:
                     return int(datetime.strptime(pd, fmt).timestamp() * 1000)
-                except: continue
+                except Exception: continue
         return None
 
     def extract_item_id(self, item: Dict[str, Any]) -> str:
@@ -254,7 +253,12 @@ class JiangsuCCGPSearch(BaseSpider):
         return None, 0.0
 
     def recognize_captcha(self, image_bytes: bytes) -> Tuple[Optional[str], float]:
-        # Helper to choose method
+        # 优先使用 API 识别
+        if OCR_API_URL:
+            text, score = self.recognize_captcha_api(image_bytes)
+            if text and score >= CAPTCHA_CONFIDENCE_THRESHOLD:
+                return text, score
+        # Fallback 到本地 OCR
         return self.recognize_captcha_local(image_bytes)
 
     def get_captcha(self, max_retries=CAPTCHA_MAX_RETRIES) -> Optional[str]:
@@ -269,9 +273,10 @@ class JiangsuCCGPSearch(BaseSpider):
                         if attempt % 3 == 0:
                             self.log_info(f"OCR 识别置信度不足 ({conf:.2f} < {CAPTCHA_CONFIDENCE_THRESHOLD}) 或结果为空: {code}")
                             try:
-                                with open(f"failed_captcha_{attempt}.jpg", "wb") as f:
+                                debug_path = os.path.join(CACHE_DIR, f"failed_captcha_{attempt}.jpg")
+                                with open(debug_path, "wb") as f:
                                     f.write(r.content)
-                            except: pass
+                            except Exception: pass
                 else:
                     self.log_error(f"无法获取验证码图片，状态码: {r.status_code}")
                     pass

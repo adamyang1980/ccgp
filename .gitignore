@@ -1,6 +1,7 @@
 # Sensitive Data
 *.env
 .env.*
+!.env.example
 *.private
 secrets.json
 

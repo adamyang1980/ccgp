@@ -33,6 +33,14 @@ def main():
     
     args = parser.parse_args()
     
+    # 配置日志系统
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    
     try:
         SiteClass = get_searcher(args.site)
     except KeyError:

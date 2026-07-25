@@ -1,6 +1,3 @@
-import json
-import os
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -92,16 +89,6 @@ def probe_with_http_request(
         engine = "BROWSER" if kind in ("slider", "access_verify") else "HTTP"
         return ProbeResult(kind=kind, engine=engine, evidence=evidence)
     return ProbeResult(kind="none", engine="HTTP", evidence={})
-
-
-def _read_json_if_exists(path: str) -> Optional[Any]:
-    if not path or not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
 
 
 def run_phase_with_probe_and_fallback(

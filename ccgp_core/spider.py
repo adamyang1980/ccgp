@@ -3,14 +3,12 @@ import os
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 from ccgp_core.antibot import ChallengeStateMachine, RunContext, prepare_results_dir
-from ccgp_core.fs import sanitize_filename
 from ccgp_core.output import ensure_dir, write_json, write_text
-from ccgp_core.pipeline import probe_with_http_request
-from ccgp_core.request_fingerprint import RandomHeadersGenerator, random_delay, get_random_delay_value
+from ccgp_core.request_fingerprint import RandomHeadersGenerator, random_delay
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +60,10 @@ class BaseSpider(ABC):
             self.log_info(f"配置: {config}")
 
     def log_info(self, msg: str):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [INFO] {msg}")
+        logger.info(msg)
 
     def log_error(self, msg: str):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [ERROR] {msg}")
+        logger.error(msg)
 
     def configure_session(self):
         # 使用随机化请求头
@@ -106,6 +102,7 @@ class BaseSpider(ABC):
                 return True
             
             self.log_info(f"检测到访问限制: {result}")
+            self.sm.detected(kind=result, message=f"probe detected: {result}")
             
             # 1c, 1d. 处理验证
             if not self.handle_verification(result):
@@ -275,7 +272,7 @@ class BaseSpider(ABC):
             if end_of_day:
                 dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
             else:
-                 dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
             return int(dt.timestamp() * 1000)
         except Exception:
             self.log_error(f"Failed to parse date: {date_str}")
@@ -287,18 +284,18 @@ class BaseSpider(ABC):
         """
         # 1h. 二次过滤参数 (默认不开启)
         if self.secondary_filter and self.keywords:
-             title = item.get("title", "")
-             # 简单的关键词检查 (ANY match)
-             if not any(k in title for k in self.keywords):
-                 return False
+            title = item.get("title", "")
+            # 简单的关键词检查 (ANY match)
+            if not any(k in title for k in self.keywords):
+                return False
 
         # 日期过滤
         item_ts = self.extract_item_timestamp(item)
         if item_ts is not None:
-             if self.start_ts is not None and item_ts < self.start_ts:
-                 return False
-             if self.end_ts is not None and item_ts > self.end_ts:
-                 return False
+            if self.start_ts is not None and item_ts < self.start_ts:
+                return False
+            if self.end_ts is not None and item_ts > self.end_ts:
+                return False
         
         return True
 

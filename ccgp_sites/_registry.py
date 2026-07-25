@@ -1,6 +1,9 @@
 import importlib
+import inspect
 import pkgutil
 from typing import Dict, Type
+
+from ccgp_core.spider import BaseSpider
 
 
 def _discover_sites() -> Dict[str, Type]:
@@ -18,15 +21,18 @@ def _discover_sites() -> Dict[str, Type]:
             adapter = importlib.import_module(f"ccgp_sites.{name}.adapter")
         except Exception:
             continue
+        # 优先按约定命名查找: {Name}CCGPSearch
         searcher = getattr(adapter, f"{name.capitalize()}CCGPSearch", None)
-
-
+        # 通用 fallback: 遍历 adapter 模块中所有 BaseSpider 子类
         if searcher is None:
-            searcher = getattr(adapter, "CCGPSearch", None)
-        if searcher is None:
-            for attr in ("JiangsuCCGPSearch", "XinjiangCCGPSearch"):
-                if hasattr(adapter, attr):
-                    searcher = getattr(adapter, attr)
+            for attr_name in dir(adapter):
+                obj = getattr(adapter, attr_name)
+                if (
+                    inspect.isclass(obj)
+                    and issubclass(obj, BaseSpider)
+                    and obj is not BaseSpider
+                ):
+                    searcher = obj
                     break
         if searcher is not None:
             searchers[name] = searcher
